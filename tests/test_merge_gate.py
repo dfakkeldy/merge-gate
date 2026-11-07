@@ -41,7 +41,8 @@ class Tiers(unittest.TestCase):
         for path in (".github/workflows/ci.yml", "ios/fastlane/Fastfile", "App/App.entitlements",
                      ".env.production", "keys/AuthKey.p8", ".claude/settings.json",
                      ".claude/commands/ship.md", ".codex/hooks.json", ".github/copilot-instructions.md",
-                     "fastlane/screenshots/en-US/1.png", ".claude", "app/.cursor"):
+                     "fastlane/screenshots/en-US/1.png", ".claude", "app/.cursor", "REVIEW.md",
+                     "web/REVIEW.md"):
             with self.subTest(path):
                 self.assertEqual(tier([path, "src/app.ts"])[0], "dan")
 
@@ -62,6 +63,7 @@ class Tiers(unittest.TestCase):
 
     def test_prose_and_images_are_low_but_agent_instructions_are_not(self):
         self.assertEqual(tier(["README.md", "docs/plan.md", "art/shot.png"])[0], "low")
+        self.assertEqual(tier(["docs/audits/CODE_REVIEW.md", "REVIEW-LOG.md"])[0], "low")
         for path in ("CLAUDE.md", "skills/x/SKILL.md", "docs/index.html", "requirements-dev.txt"):
             with self.subTest(path):
                 self.assertEqual(tier(["README.md", path])[0], "normal")
