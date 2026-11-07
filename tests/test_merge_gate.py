@@ -318,7 +318,7 @@ class CallerWorkflow(unittest.TestCase):
             self.lines = [line for line in f.read().splitlines() if not line.lstrip().startswith("#")]
         self.text = "\n".join(self.lines)
 
-    def test_it_runs_from_the_base_branch_on_every_pr_change(self):
+    def test_it_runs_from_the_default_branch_on_every_pr_change(self):
         self.assertIn("pull_request_target:", self.text)
         self.assertNotIn("pull_request:", self.text.replace("pull_request_target:", ""))
         for kind in ("opened", "synchronize", "reopened", "edited", "labeled", "unlabeled", "ready_for_review"):

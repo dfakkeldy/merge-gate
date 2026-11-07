@@ -50,8 +50,9 @@ of both, so they agree on every repository that uses only this policy.
 1. Copy [`.github/workflows/merge-gate.yml`](.github/workflows/merge-gate.yml) unchanged
    into the repository's **default branch** and merge it. GitHub starts
    `pull_request_target` from the default branch for PRs into any branch, so a copy
-   only on another branch (say `nightly`, where `main` is the default) never runs; a
-   PR into a branch without it, dfakkeldy/merge-gate#4, still ran the gate. Where the
+   only on another branch (say `nightly`, where `main` is the default) never runs
+   ([#4](https://github.com/dfakkeldy/merge-gate/pull/4) showed a PR into a branch
+   without the file still running the gate). Where the
    integration branch isn't the default, put the same file on both, so promotions
    merge it without conflict.
 2. Then require the check (a check that can't run yet would block every PR):
