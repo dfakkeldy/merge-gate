@@ -1,6 +1,5 @@
-"""merge_gate.py: the tiers, who may approve, the check's verdict, and the caller workflow.
-
-Offline: a fake REST API stands in for GitHub.
+"""merge_gate.py: the tiers, who may approve and when, the check's verdict per commit,
+and the caller workflow. Offline: a fake REST API stands in for GitHub.
 """
 import io, json, os, sys, tempfile, unittest, urllib.error
 from contextlib import redirect_stdout
@@ -12,6 +11,8 @@ import merge_gate  # noqa: E402
 
 POLICY = merge_gate.load_policy()
 REPO = "dfakkeldy/example"
+SHA = "abc1234567890"
+PUSHED = "2026-11-07T09:00:00Z"  # when the head commit's first check suite appeared
 
 
 def files(*paths, removed=(), renamed=None):
@@ -40,7 +41,7 @@ class Tiers(unittest.TestCase):
         for path in (".github/workflows/ci.yml", "ios/fastlane/Fastfile", "App/App.entitlements",
                      ".env.production", "keys/AuthKey.p8", ".claude/settings.json",
                      ".claude/commands/ship.md", ".codex/hooks.json", ".github/copilot-instructions.md",
-                     "fastlane/screenshots/en-US/1.png"):
+                     "fastlane/screenshots/en-US/1.png", ".claude", "app/.cursor"):
             with self.subTest(path):
                 self.assertEqual(tier([path, "src/app.ts"])[0], "dan")
 
@@ -65,12 +66,13 @@ class Tiers(unittest.TestCase):
             with self.subTest(path):
                 self.assertEqual(tier(["README.md", path])[0], "normal")
 
-    def test_the_gate_guards_its_own_rules(self):
-        for path in ("merge_gate.py", "merge_policy.json", "action.yml"):
+    def test_everything_in_the_gate_repo_waits_for_dan(self):
+        for path in ("merge_gate.py", "argparse.py", "json.pyc", "tests/test_merge_gate.py", "README.md"):
             with self.subTest(path):
                 self.assertEqual(tier([path], repo="dfakkeldy/merge-gate", base="main", nightly=False)[0], "dan")
-        self.assertEqual(tier(["tests/test_merge_gate.py"], repo="dfakkeldy/merge-gate", base="main",
-                              nightly=False)[0], "normal")
+
+    def test_repo_names_match_in_any_case(self):
+        self.assertEqual(tier(["README.md"], repo="DFakkeldy/Merge-Gate", base="main", nightly=False)[0], "dan")
 
 
 class LocalPolicy(unittest.TestCase):
@@ -86,8 +88,7 @@ class LocalPolicy(unittest.TestCase):
                                      "dfakkeldy/merge-gate": {"dan": ["README.md"]}}})
         policy = merge_gate.load_policy(local=path)
         self.assertEqual(policy["repos"]["dfakkeldy/private"]["dan"], ["secret/**"])
-        self.assertIn("README.md", policy["repos"]["dfakkeldy/merge-gate"]["dan"])
-        self.assertIn("merge_gate.py", policy["repos"]["dfakkeldy/merge-gate"]["dan"])
+        self.assertEqual(policy["repos"]["dfakkeldy/merge-gate"]["dan"], ["**", "README.md"])
         self.assertEqual(merge_gate.load_policy()["repos"].get("dfakkeldy/private"), None)
 
     def test_a_local_file_cannot_loosen_anything(self):
@@ -106,116 +107,187 @@ def labelled(name, login, at="2026-11-07T10:00:00Z", event="labeled", eid=1):
 
 
 class Approval(unittest.TestCase):
+    def approved(self, labels, events, since=PUSHED):
+        return merge_gate.dan_approved(REPO, list(labels), events, POLICY, since)[0]
+
     def test_only_the_owners_own_label_counts(self):
-        self.assertEqual(merge_gate.dan_approved(REPO, ["dan-approved"], [labelled("dan-approved", "dfakkeldy")],
-                                                 POLICY), (True, "dfakkeldy"))
-        self.assertEqual(merge_gate.dan_approved(REPO, ["dan-approved"],
-                                                 [labelled("dan-approved", "dfakkeldy-claude[bot]")], POLICY),
-                         (False, "dfakkeldy-claude[bot]"))
-        self.assertEqual(merge_gate.dan_approved(REPO, ["dan-approved"], [], POLICY), (False, None))
-        self.assertEqual(merge_gate.dan_approved(REPO, [], [labelled("dan-approved", "dfakkeldy")], POLICY),
-                         (False, None))
+        self.assertTrue(self.approved(["dan-approved"], [labelled("dan-approved", "dfakkeldy")]))
+        self.assertFalse(self.approved(["dan-approved"], [labelled("dan-approved", "dfakkeldy-claude[bot]")]))
+        self.assertFalse(self.approved(["dan-approved"], []))
+        self.assertFalse(self.approved([], [labelled("dan-approved", "dfakkeldy")]))
 
     def test_the_latest_labelling_decides(self):
         events = [labelled("dan-approved", "dfakkeldy-claude[bot]", "2026-11-07T12:00:00Z", eid=3),
                   labelled("dan-approved", "dfakkeldy", "2026-11-07T10:00:00Z", eid=1),
                   labelled("dan-approved", "dfakkeldy", "2026-11-07T11:00:00Z", "unlabeled", eid=2),
                   labelled("needs-dan", "dfakkeldy", "2026-11-07T13:00:00Z", eid=4)]
-        self.assertEqual(merge_gate.dan_approved(REPO, ["dan-approved"], events, POLICY)[0], False)
+        self.assertFalse(self.approved(["dan-approved"], events))
         events.append(labelled("dan-approved", "DFakkeldy", "2026-11-07T14:00:00Z", eid=5))
-        self.assertEqual(merge_gate.dan_approved(REPO, ["dan-approved"], events, POLICY)[0], True)
+        self.assertTrue(self.approved(["dan-approved"], events))
+
+    def test_approval_covers_only_commits_pushed_before_it(self):
+        dan = [labelled("dan-approved", "dfakkeldy", "2026-11-07T10:00:00Z")]
+        self.assertTrue(self.approved(["dan-approved"], dan, since="2026-11-07T09:59:59Z"))
+        self.assertFalse(self.approved(["dan-approved"], dan, since="2026-11-07T10:00:01Z"))
+        self.assertFalse(self.approved(["dan-approved"], dan, since=None))
+        why = merge_gate.dan_approved(REPO, ["dan-approved"], dan, POLICY, "2026-11-07T11:00:00Z")[1]
+        self.assertIn("before the latest commit", why)
+
+    def test_needs_dan_holds_after_it_is_removed(self):
+        events = [labelled("needs-dan", "dfakkeldy-claude[bot]"),
+                  labelled("needs-dan", "dfakkeldy-claude[bot]", "2026-11-07T11:00:00Z", "unlabeled")]
+        self.assertEqual(merge_gate.effective_labels([], events, POLICY), ["needs-dan"])
+        self.assertEqual(merge_gate.effective_labels(["x"], [], POLICY), ["x"])
+
+    def test_first_seen_is_the_earliest_check_suite(self):
+        suites = [{"created_at": "2026-11-07T10:00:00Z"}, {"created_at": "2026-11-07T09:00:00Z"}, {}]
+        self.assertEqual(merge_gate.first_seen(suites), "2026-11-07T09:00:00Z")
+        self.assertIsNone(merge_gate.first_seen([]))
+
+
+def pr(number=7, base="nightly", labels=(), sha=SHA, user=None):
+    return {"number": number, "base": {"ref": base}, "head": {"ref": f"claude/{number}", "sha": sha},
+            "labels": [{"name": n} for n in labels], "user": user or {"login": "dfakkeldy", "type": "User"}}
 
 
 class FakeAPI:
-    """Answers the gate's REST calls for PR 7 and records each path."""
+    """Answers the gate's REST calls and records each path. prs: open PRs; files and
+    events are per PR number."""
 
-    def __init__(self, paths=("src/app.py",), base="nightly", labels=(), events=(), nightly=True,
-                 user=None, fail=None):
-        self.pr = {"number": 7, "base": {"ref": base}, "head": {"ref": "claude/x"},
-                   "labels": [{"name": n} for n in labels], "user": user or {"login": "dfakkeldy", "type": "User"}}
-        self.files = [{"filename": p, "status": "modified"} for p in paths]
-        self.events, self.nightly, self.fail, self.calls = list(events), nightly, fail, []
+    def __init__(self, prs=None, files=None, events=None, nightly=True, suites=(PUSHED,), fail=None):
+        self.prs = list(prs) if prs is not None else [pr()]
+        self.files = files or {}
+        self.events = events or {}
+        self.nightly, self.suites, self.fail, self.calls = nightly, list(suites), fail, []
 
     def __call__(self, path, paginate=False):
         self.calls.append(path)
         if self.fail and self.fail in path:
             raise urllib.error.HTTPError(path, 502, "Bad Gateway", {}, None)
+        if "/pulls?state=open" in path:
+            return [dict(p) for p in self.prs]
+        if "/pulls/" in path and "/files" in path:
+            number = int(path.split("/pulls/")[1].split("/")[0])
+            return [{"filename": f, "status": "modified"} for f in self.files.get(number, ["src/app.py"])]
         if path.endswith("/pulls/7"):
-            return dict(self.pr)
-        if "/pulls/7/files" in path:
-            return list(self.files)
+            return dict(self.prs[0])
         if path.endswith("/branches/nightly"):
             if self.nightly:
                 return {"name": "nightly"}
             raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
-        if "/issues/7/events" in path:
-            return list(self.events)
+        if "/check-suites" in path:
+            return {"check_suites": [{"created_at": t} for t in self.suites]}
+        if "/issues/" in path and "/events" in path:
+            return list(self.events.get(int(path.split("/issues/")[1].split("/")[0]), []))
         raise AssertionError(path)
 
 
-def run_main(fake):
+def run_main(fake, argv=("--repo", REPO, "--pr", "7")):
     out = io.StringIO()
     with redirect_stdout(out), mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}):
-        code = merge_gate.main(["--repo", REPO, "--pr", "7"], get=fake)
+        code = merge_gate.main(list(argv), get=fake)
     return code, out.getvalue()
 
 
-class Gate(unittest.TestCase):
-    def test_ordinary_prs_pass_without_reading_label_history(self):
-        fake = FakeAPI()
-        self.assertEqual(merge_gate.gate(REPO, 7, POLICY, fake)[:2], (True, "normal"))
-        self.assertFalse(any("/events" in c for c in fake.calls))
+WORKFLOW = {7: [".github/workflows/ci.yml"]}
 
-    def test_stop_list_fails_until_the_owner_approves(self):
-        self.assertEqual(run_main(FakeAPI(paths=(".github/workflows/ci.yml",)))[0], 1)
-        bot = FakeAPI(paths=(".github/workflows/ci.yml",), labels=("dan-approved",),
-                      events=[labelled("dan-approved", "dfakkeldy-claude[bot]")])
+
+class Gate(unittest.TestCase):
+    def test_ordinary_prs_pass(self):
+        self.assertEqual(run_main(FakeAPI())[0], 0)
+        self.assertEqual(run_main(FakeAPI(files={7: ["README.md"]}))[0], 0)
+
+    def test_stop_list_fails_until_the_owner_approves_after_the_latest_commit(self):
+        self.assertEqual(run_main(FakeAPI(files=WORKFLOW))[0], 1)
+        bot = FakeAPI(prs=[pr(labels=["dan-approved"])], files=WORKFLOW,
+                      events={7: [labelled("dan-approved", "dfakkeldy-claude[bot]")]})
         code, out = run_main(bot)
         self.assertEqual(code, 1)
         self.assertIn("doesn't count", out)
-        dan = FakeAPI(paths=(".github/workflows/ci.yml",), labels=("dan-approved", "needs-dan"),
-                      events=[labelled("dan-approved", "dfakkeldy")])
+        dan = FakeAPI(prs=[pr(labels=["dan-approved", "needs-dan"])], files=WORKFLOW,
+                      events={7: [labelled("dan-approved", "dfakkeldy")]})
         code, out = run_main(dan)
         self.assertEqual(code, 0)
         self.assertIn("approved: dfakkeldy added dan-approved", out)
+        pushed_later = FakeAPI(prs=[pr(labels=["dan-approved"])], files=WORKFLOW,
+                               events={7: [labelled("dan-approved", "dfakkeldy")]}, suites=["2026-11-07T10:30:00Z"])
+        code, out = run_main(pushed_later)
+        self.assertEqual(code, 1)
+        self.assertIn("before the latest commit", out)
 
-    def test_needs_dan_and_promotions_fail(self):
-        self.assertEqual(run_main(FakeAPI(labels=("needs-dan",)))[0], 1)
-        self.assertEqual(run_main(FakeAPI(base="main", nightly=True))[0], 1)
-        self.assertEqual(run_main(FakeAPI(base="main", nightly=False))[0], 0)
+    def test_needs_dan_promotions_and_a_removed_hold_fail(self):
+        self.assertEqual(run_main(FakeAPI(prs=[pr(labels=["needs-dan"])]))[0], 1)
+        self.assertEqual(run_main(FakeAPI(prs=[pr(base="main")], nightly=True))[0], 1)
+        self.assertEqual(run_main(FakeAPI(prs=[pr(base="main")], nightly=False))[0], 0)
+        removed = FakeAPI(events={7: [labelled("needs-dan", "dfakkeldy"),
+                                      labelled("needs-dan", "dfakkeldy", "2026-11-07T11:00:00Z", "unlabeled")]})
+        code, out = run_main(removed)
+        self.assertEqual(code, 1)
+        self.assertIn("holds until Dan approves", out)
 
-    def test_any_error_fails_the_check(self):
-        for where in ("/pulls/7/files", "/branches/nightly", "/pulls/7"):
-            with self.subTest(where):
-                code, out = run_main(FakeAPI(fail=where))
-                self.assertEqual(code, 1)
-                self.assertIn("could not judge", out)
-        approved = FakeAPI(paths=(".github/workflows/ci.yml",), labels=("dan-approved",), fail="/events")
-        self.assertEqual(run_main(approved)[0], 1)
+    def test_every_open_pr_on_the_commit_must_pass(self):
+        # One head commit, two PRs: back to nightly (normal) and on to main (a promotion).
+        shared = [pr(7, "nightly"), pr(8, "main"), pr(9, "nightly", sha="other")]
+        code, out = run_main(FakeAPI(prs=shared))
+        self.assertEqual(code, 1)
+        self.assertIn("#8 into main: waits for Dan", out)
+        self.assertNotIn("#9", out)
+        approved = [pr(7, "nightly"), pr(8, "main", labels=["dan-approved"])]
+        fake = FakeAPI(prs=approved, events={8: [labelled("dan-approved", "dfakkeldy")]})
+        self.assertEqual(run_main(fake)[0], 0)
 
-    def test_a_workflow_opened_pr_counts_as_the_repos_automation(self):
-        self.assertEqual(merge_gate.author_of({"login": "github-actions[bot]", "type": "Bot"}), "app/github-actions")
-        self.assertEqual(merge_gate.author_of({"login": "dfakkeldy", "type": "User"}), "dfakkeldy")
-
-    def test_the_summary_says_how_to_approve(self):
-        with tempfile.NamedTemporaryFile("r", suffix=".md") as summary:
-            with redirect_stdout(io.StringIO()), mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary.name}):
-                merge_gate.main(["--repo", REPO, "--pr", "7"], get=FakeAPI(paths=("App/App.entitlements",)))
-            text = summary.read()
-        self.assertIn("waits for Dan", text)
-        self.assertIn("`dan-approved`", text)
-
-    def test_the_pr_number_comes_from_the_event(self):
+    def test_a_commit_that_no_open_pr_heads_fails(self):
+        fake = FakeAPI(prs=[pr(sha="newer")])
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as event:
-            json.dump({"pull_request": {"number": 7}}, event)
+            json.dump({"pull_request": {"number": 7, "head": {"sha": SHA}}}, event)
+        self.addCleanup(os.unlink, event.name)
+        env = {"GITHUB_EVENT_PATH": event.name, "GITHUB_REPOSITORY": REPO, "GITHUB_STEP_SUMMARY": ""}
+        out = io.StringIO()
+        with redirect_stdout(out), mock.patch.dict(os.environ, env):
+            self.assertEqual(merge_gate.main([], get=fake), 1)
+        self.assertIn("no open PR has", out.getvalue())
+
+    def test_the_commit_comes_from_the_event(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as event:
+            json.dump({"pull_request": {"number": 7, "head": {"sha": SHA}}}, event)
         self.addCleanup(os.unlink, event.name)
         env = {"GITHUB_EVENT_PATH": event.name, "GITHUB_REPOSITORY": REPO, "GITHUB_STEP_SUMMARY": ""}
         with redirect_stdout(io.StringIO()), mock.patch.dict(os.environ, env):
             self.assertEqual(merge_gate.main([], get=FakeAPI()), 0)
 
+    def test_any_error_fails_the_check(self):
+        for where in ("/pulls?state=open", "/files", "/branches/nightly", "/check-suites", "/events"):
+            with self.subTest(where):
+                code, out = run_main(FakeAPI(fail=where))
+                self.assertEqual(code, 1)
+                self.assertIn("could not judge", out)
+        ghost = FakeAPI(prs=[dict(pr(), user=None)])  # a deleted account
+        self.assertEqual(run_main(ghost)[0], 0)
+        broken = FakeAPI(prs=[{"number": 7, "head": {"sha": SHA}}])  # a malformed answer
+        self.assertEqual(run_main(broken)[0], 1)
+
+    def test_a_workflow_opened_pr_counts_as_the_repos_automation(self):
+        self.assertEqual(merge_gate.author_of({"login": "github-actions[bot]", "type": "Bot"}), "app/github-actions")
+        self.assertEqual(merge_gate.author_of({"login": "dfakkeldy", "type": "User"}), "dfakkeldy")
+        self.assertEqual(merge_gate.author_of(None), "")
+
+    def test_a_file_name_cannot_start_a_line_in_the_log(self):
+        code, out = run_main(FakeAPI(files={7: [".github/workflows/x\n::warning::forged.yml"]}))
+        self.assertEqual(code, 1)
+        self.assertFalse([line for line in out.splitlines() if line.startswith("::warning")])
+
+    def test_the_summary_says_how_to_approve(self):
+        with tempfile.NamedTemporaryFile("r", suffix=".md") as summary:
+            with redirect_stdout(io.StringIO()), mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": summary.name}):
+                merge_gate.main(["--repo", REPO, "--pr", "7"], get=FakeAPI(files={7: ["App/App.entitlements"]}))
+            text = summary.read()
+        self.assertIn("waits for Dan", text)
+        self.assertIn("`dan-approved`", text)
+
 
 class CallerWorkflow(unittest.TestCase):
-    """The workflow every repository copies. These rules keep PR code out of the gate."""
+    """The workflow every repository copies, and the action it runs. These rules keep
+    PR code out of the gate."""
 
     def setUp(self):
         with open(os.path.join(ROOT, ".github", "workflows", "merge-gate.yml")) as f:
@@ -228,14 +300,22 @@ class CallerWorkflow(unittest.TestCase):
         for kind in ("opened", "synchronize", "reopened", "edited", "labeled", "unlabeled", "ready_for_review"):
             self.assertIn(kind, self.text)
 
-    def test_it_never_checks_out_or_skips(self):
+    def test_it_never_checks_out_skips_or_writes(self):
         self.assertNotIn("checkout", self.text)
         self.assertFalse([line for line in self.lines if line.strip().startswith("if:")])
         self.assertNotIn("write", self.text)
 
+    def test_runs_for_one_commit_share_a_queue(self):
+        self.assertIn("group: merge-gate-${{ github.event.pull_request.head.sha }}", self.text)
+
     def test_the_check_is_named_merge_gate_and_uses_this_action(self):
         self.assertIn("    name: Merge gate", self.text)
         self.assertIn("uses: dfakkeldy/merge-gate@main", self.text)
+
+    def test_the_action_runs_python_isolated(self):
+        with open(os.path.join(ROOT, "action.yml")) as f:
+            action = f.read()
+        self.assertIn('python3 -I "$GITHUB_ACTION_PATH/merge_gate.py"', action)
 
 
 if __name__ == "__main__":

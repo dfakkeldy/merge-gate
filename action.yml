@@ -5,8 +5,10 @@ runs:
   using: composite
   steps:
     # Reads the PR through the API only. Nothing from the PR is checked out or run.
+    # -I (isolated): the action's folder is not on sys.path, so no file beside
+    # merge_gate.py can stand in for a standard-library module.
     - name: Judge the pull request
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-      run: python3 "$GITHUB_ACTION_PATH/merge_gate.py"
+      run: python3 -I "$GITHUB_ACTION_PATH/merge_gate.py"

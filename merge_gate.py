@@ -2,15 +2,16 @@
 
 GitHub's native auto-merge (gh pr merge --auto, the merge button, apps that arm it)
 waits only for required checks. This is one. A pull request that touches the stop
-list, or has the needs-dan label, fails it until the repository owner adds the
-dan-approved label.
+list, or has had the needs-dan label, fails it until the repository owner adds the
+dan-approved label after its latest commit.
 
-  python3 merge_gate.py                       # in Actions: judge the event's PR
-  python3 merge_gate.py --repo o/r --pr 42    # locally (GH_TOKEN for a private repo)
+  python3 -I merge_gate.py                       # in Actions: judge the event's commit
+  python3 -I merge_gate.py --repo o/r --pr 42    # locally (GH_TOKEN for a private repo)
 
-action.yml runs it on pull_request_target. It reads the PR's files, labels and label
-history through the REST API and never checks out or runs the PR's code. An error
-fails the check: a gate that can't see the PR doesn't wave it through.
+action.yml runs it on pull_request_target. It reads PRs, files, label history and
+check suites through the REST API and never checks out or runs the PR's code. A check
+belongs to a commit, not to a PR, so it judges every open PR whose head is that commit
+and passes only if all of them pass. Any error fails the check.
 
 The tiers come from merge_policy.json. classify() is shared with land_pr.py, the tool
 that lands agents' PRs, which keeps a byte-identical copy of this file and the policy.
@@ -50,7 +51,8 @@ def load_policy(path=POLICY_FILE, local=None):
 
 
 def glob_re(pattern):
-    """A glob as a regex: ** crosses folders, * and ? stay inside one."""
+    """A glob as a regex: ** crosses folders, * and ? stay inside one. DOTALL, so a
+    line break in a file name can't slip past the stop list."""
     out, i = "", 0
     while i < len(pattern):
         if pattern.startswith("**/", i):
@@ -63,7 +65,7 @@ def glob_re(pattern):
             out, i = out + "[^/]", i + 1
         else:
             out, i = out + re.escape(pattern[i]), i + 1
-    return re.compile(out + r"\Z")
+    return re.compile(out + r"\Z", re.DOTALL)
 
 
 def matches(path, patterns):
@@ -74,7 +76,7 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="")
     """(tier, reasons). files: [{"path", "previous", "status"}]; previous is set on renames.
     A repo can name automation branches whose PRs, opened by a workflow, are low tier."""
     dan, low = policy["dan"], policy["low"]
-    extra = policy.get("repos", {}).get(repo, {})
+    extra = {k.lower(): v for k, v in policy.get("repos", {}).items()}.get(repo.lower(), {})
     dan_paths = dan["paths"] + extra.get("dan", [])
     reasons = []
     if dan["label"] in labels:
@@ -104,23 +106,46 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="")
     return "normal", ["code or config outside the stop list"]
 
 
-def approver(events, label):
-    """Who last added `label`, from a PR's issue events, or None."""
-    who = None
-    for e in sorted(events, key=lambda e: (e.get("created_at") or "", e.get("id") or 0)):
-        if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == label:
-            who = (e.get("actor") or {}).get("login")
-    return who
+def _labelled(events, label):
+    """The PR's 'labeled' events for one label, oldest first."""
+    return sorted((e for e in events if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == label),
+                  key=lambda e: (e.get("created_at") or "", e.get("id") or 0))
 
 
-def dan_approved(repo, labels, events, policy):
-    """(approved, who added the label). Only the repository owner's own label counts.
-    Agents label as their GitHub Apps (name[bot]), so an agent can't approve its own PR."""
-    label = policy["dan"]["approved_label"]
+def effective_labels(labels, events, policy):
+    """The labels to judge by. needs-dan, once added, holds until Dan approves:
+    removing the label doesn't release the PR."""
+    hold = policy["dan"]["label"]
+    if hold not in labels and _labelled(events, hold):
+        return list(labels) + [hold]
+    return list(labels)
+
+
+def first_seen(suites):
+    """When GitHub first saw a commit: its earliest check suite (GitHub's clock), or None."""
+    times = [s["created_at"] for s in suites if s.get("created_at")]
+    return min(times) if times else None
+
+
+def dan_approved(repo, labels, events, policy, since):
+    """(approved, why). Dan approves by adding the approved label from his own account
+    (the repo owner) after the PR's head commit appeared (since, from first_seen), so the
+    approval covers the commit he saw. A label added by an agent's GitHub App
+    (name[bot]) doesn't count. One added with Dan's own token can't be told apart from
+    his; the agents' instructions and Bash guard forbid that."""
+    label, owner = policy["dan"]["approved_label"], repo.split("/")[0]
     if label not in labels:
-        return False, None
-    who = approver(events, label)
-    return bool(who) and who.lower() == repo.split("/")[0].lower(), who
+        return False, ""
+    added = _labelled(events, label)
+    last = added[-1] if added else {}
+    who = (last.get("actor") or {}).get("login") or ""
+    if who.lower() != owner.lower():
+        return False, f"{label} was added by {who or 'someone else'}, not by {owner}, so it doesn't count"
+    if not since:
+        return False, f"{label} can't be tied to a commit (no record of when the head was pushed)"
+    if (last.get("created_at") or "") <= since:
+        return False, f"{label} was added before the latest commit; Dan removes it and adds it again to approve that"
+    return True, f"approved: {who} added {label} after the latest commit"
 
 
 # --- GitHub ------------------------------------------------------------------
@@ -156,52 +181,68 @@ def branch_exists(get, repo, branch):
 
 def author_of(user):
     """A PR author as gh writes it: app/<slug> for an App, else the login."""
-    login = user.get("login", "")
-    if user.get("type") == "Bot" and login.endswith("[bot]"):
+    login = (user or {}).get("login") or ""
+    if (user or {}).get("type") == "Bot" and login.endswith("[bot]"):
         return "app/" + login[:-len("[bot]")]
     return login
 
 
-def gate(repo, number, policy, get):
-    """(passed, tier, lines) for one PR. get(path, paginate=False) reads the REST API."""
-    pr = get(f"repos/{repo}/pulls/{number}")
+def judge_pr(repo, pr, policy, get, has_nightly, since):
+    """(passed, tier, reasons) for one open PR."""
+    number = pr["number"]
     files = [{"path": f["filename"], "previous": f.get("previous_filename"), "status": f["status"]}
              for f in get(f"repos/{repo}/pulls/{number}/files?per_page=100", paginate=True)]
-    labels = [label["name"] for label in pr["labels"]]
-    tier, reasons = classify(repo, pr["base"]["ref"], labels, files, branch_exists(get, repo, "nightly"),
-                             policy, pr["head"]["ref"], author_of(pr["user"]))
+    events = get(f"repos/{repo}/issues/{number}/events?per_page=100", paginate=True)
+    labels = effective_labels([label["name"] for label in pr["labels"]], events, policy)
+    tier, reasons = classify(repo, pr["base"]["ref"], labels, files, has_nightly, policy,
+                             pr["head"]["ref"], author_of(pr.get("user")))
     if tier != "dan":
         return True, tier, reasons
-    approved_label = policy["dan"]["approved_label"]
-    events = get(f"repos/{repo}/issues/{number}/events?per_page=100", paginate=True) \
-        if approved_label in labels else []
-    ok, who = dan_approved(repo, labels, events, policy)
-    if ok:
-        return True, tier, reasons + [f"approved: {who} added {approved_label}"]
-    if who:
-        reasons.append(f"{approved_label} was added by {who}, not by {repo.split('/')[0]}, so it doesn't count")
-    return False, tier, reasons
+    if policy["dan"]["label"] not in [label["name"] for label in pr["labels"]] and policy["dan"]["label"] in labels:
+        reasons.append(f"{policy['dan']['label']} was removed, but it holds until Dan approves")
+    approved, why = dan_approved(repo, labels, events, policy, since)
+    return approved, tier, reasons + ([why] if why else [])
 
 
-def report(passed, tier, lines, number):
+def gate(repo, sha, policy, get):
+    """(passed, lines) for one commit. Branch protection reads the check from the commit,
+    so every open PR whose head is this commit must pass."""
+    prs = [p for p in get(f"repos/{repo}/pulls?state=open&per_page=100", paginate=True) if p["head"]["sha"] == sha]
+    if not prs:
+        return False, [f"no open PR has {sha[:10]} as its head; the run for the PR's new head decides"]
+    has_nightly = branch_exists(get, repo, "nightly")
+    since = first_seen(get(f"repos/{repo}/commits/{sha}/check-suites?per_page=100").get("check_suites", []))
+    passed, lines = True, []
+    for pr in sorted(prs, key=lambda p: p["number"]):
+        ok, tier, reasons = judge_pr(repo, pr, policy, get, has_nightly, since)
+        passed = passed and ok
+        lines.append(f"#{pr['number']} into {pr['base']['ref']}: {'passes' if ok else 'waits for Dan'} "
+                     f"(tier {tier}: {'; '.join(reasons)})")
+    return passed, lines
+
+
+def one_line(text):
+    """No line breaks: a file name can't start a workflow command in the log."""
+    return " ".join(str(text).splitlines())
+
+
+def report(passed, lines, sha):
     """Print the verdict and write the job summary, so the reason shows on a phone."""
-    stop = not passed and tier == "dan"
-    title = (f"Merge gate passed (tier {tier})" if passed else
-             f"Merge gate: PR #{number} is on the merge stop list and waits for Dan" if stop else
-             f"Merge gate could not judge PR #{number}")
+    lines = [one_line(line) for line in lines]
+    title = f"Merge gate {'passed' if passed else 'failed'} for {sha[:10]}"
     print(title)
     for line in lines:
         print(f"- {line}")
     if not passed:
-        hint = " Dan approves it by adding the dan-approved label himself." if stop else ""
-        print(f"::error title=Merge gate::{'; '.join(lines)}.{hint}")
+        message = "; ".join(lines).replace("%", "%25")
+        print(f"::error title=Merge gate::{message}. Dan approves a stop-list PR by adding the dan-approved label himself.")
     out = os.environ.get("GITHUB_STEP_SUMMARY")
     if out:
         with open(out, "a") as f:
             f.write(f"### {title}\n\n" + "".join(f"- {line}\n" for line in lines))
-            if stop:
-                f.write("\nTo let it merge, Dan adds the `dan-approved` label from his own account. "
-                        "A label added by an agent's App doesn't count.\n")
+            if not passed:
+                f.write("\nTo let a stop-list PR merge, Dan adds the `dan-approved` label from his own account, "
+                        "after its latest commit. A label added by an agent's App doesn't count.\n")
 
 
 def main(argv=None, get=None):
@@ -210,20 +251,22 @@ def main(argv=None, get=None):
     ap.add_argument("--pr", type=int, help="PR number (default: the Actions event's PR)")
     ap.add_argument("--policy", default=POLICY_FILE, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
-    number = a.pr
-    if number is None and os.environ.get("GITHUB_EVENT_PATH"):
-        with open(os.environ["GITHUB_EVENT_PATH"]) as f:
-            number = (json.load(f).get("pull_request") or {}).get("number")
-    if not a.repo or not number:
-        ap.error("needs --repo and --pr outside a pull_request_target run")
     if get is None:
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         get = lambda path, paginate=False: api(path, token, paginate)  # noqa: E731
+    sha = ""
     try:
-        passed, tier, lines = gate(a.repo, number, load_policy(a.policy), get)
-    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
-        passed, tier, lines = False, "unknown", [f"could not judge the PR ({e}); re-run this check"]
-    report(passed, tier, lines, number)
+        if a.pr is not None:
+            sha = get(f"repos/{a.repo}/pulls/{a.pr}")["head"]["sha"]
+        elif os.environ.get("GITHUB_EVENT_PATH"):
+            with open(os.environ["GITHUB_EVENT_PATH"]) as f:
+                sha = json.load(f)["pull_request"]["head"]["sha"]
+        if not a.repo or not sha:
+            ap.error("needs --repo and --pr outside a pull_request_target run")
+        passed, lines = gate(a.repo, sha, load_policy(a.policy), get)
+    except Exception as e:  # noqa: BLE001  (any failure fails the check)
+        passed, lines = False, [f"could not judge the commit ({type(e).__name__}: {e}); re-run this check"]
+    report(passed, lines, sha or "unknown")
     return 0 if passed else 1
 
 
