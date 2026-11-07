@@ -25,3 +25,4 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
+# Trial 2, commit 1: a stop-list change the gate must hold.
