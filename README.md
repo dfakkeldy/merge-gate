@@ -35,8 +35,12 @@ of both, so they agree on every repository that uses only this policy.
   isolated mode (`-I`), so no file beside the script can stand in for a library.
 - A check belongs to a commit, and several PRs can share a head commit. The gate
   judges every open PR whose head is that commit and passes only if all of them pass.
-- Dan's label counts only if it was added after GitHub first saw the head commit (its
-  earliest check suite, on GitHub's clock). A push after approval needs a new one.
+- Dan's label counts only if it was added after the PR took its current shape: after
+  GitHub first saw the head commit (its earliest check suite) and after the PR's last
+  force-push or change of base, all on GitHub's clock. Any of those after approval
+  needs a new one.
+- `needs-dan` holds once added, even after someone removes it. A PR that later drops
+  its stop-list change still needs `dan-approved`, or a fresh PR.
 - Any error fails the check. Re-run it.
 - Every repository runs this repository's `main`, so a change here applies everywhere
   at once. Every path in this repository is on its own stop list.
@@ -69,7 +73,11 @@ out to get round it.
   "bypass" box, `gh pr merge --admin`, a raw API merge) still skips required checks.
   The gate stops the auto-merge paths, not a deliberate override.
 - An agent that uses the owner's own token can add `dan-approved` as the owner. The
-  gate can't tell that apart from Dan; the agents' rules and their Bash guard forbid it.
+  gate can't tell that apart from Dan. The agents' rules forbid it, and their Bash
+  guard flags the usual `gh` forms (a warning, unless the guard is set to block).
+- A commit pushed to some other branch before Dan's approval, then made the PR's head,
+  still counts as seen before the approval.
+- Creating a `nightly` branch later doesn't re-judge open PRs into `main`; nudge them.
 - A PR can add its own workflow with a job named `Merge gate` that passes. It runs
   from the PR's branch, comes from the same GitHub Actions app, and can be the latest
   check of that name. Only a dedicated GitHub App posting the check would close this.

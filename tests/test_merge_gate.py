@@ -101,6 +101,13 @@ class LocalPolicy(unittest.TestCase):
     def test_a_missing_local_file_is_ignored(self):
         self.assertEqual(merge_gate.load_policy(local="/nonexistent/x.json"), POLICY)
 
+    def test_another_spelling_of_a_repo_is_the_same_repo(self):
+        with self.assertRaises(ValueError):
+            merge_gate.load_policy(local=self.local({"repos": {"DFakkeldy/Merge-Gate": {"note": "x"}}}))
+        policy = merge_gate.load_policy(local=self.local({"repos": {"dfakkeldy/Merge-Gate": {"no_ci_ok": "x"}}}))
+        self.assertEqual(merge_gate.classify("dfakkeldy/merge-gate", "main", [], files("merge_gate.py"), False,
+                                             policy)[0], "dan")
+
 
 def labelled(name, login, at="2026-11-07T10:00:00Z", event="labeled", eid=1):
     return {"id": eid, "event": event, "label": {"name": name}, "actor": {"login": login}, "created_at": at}
@@ -138,6 +145,17 @@ class Approval(unittest.TestCase):
                   labelled("needs-dan", "dfakkeldy-claude[bot]", "2026-11-07T11:00:00Z", "unlabeled")]
         self.assertEqual(merge_gate.effective_labels([], events, POLICY), ["needs-dan"])
         self.assertEqual(merge_gate.effective_labels(["x"], [], POLICY), ["x"])
+
+    def test_a_force_push_or_new_base_after_approval_needs_a_new_one(self):
+        events = [labelled("dan-approved", "dfakkeldy", "2026-11-07T10:00:00Z")]
+        self.assertEqual(merge_gate.shaped_since(PUSHED, events), PUSHED)
+        for kind in ("head_ref_force_pushed", "base_ref_changed", "automatic_base_change_succeeded"):
+            with self.subTest(kind):
+                later = events + [{"event": kind, "created_at": "2026-11-07T10:05:00Z"}]
+                since = merge_gate.shaped_since(PUSHED, later)
+                self.assertEqual(since, "2026-11-07T10:05:00Z")
+                self.assertFalse(self.approved(["dan-approved"], later, since=since))
+        self.assertIsNone(merge_gate.shaped_since(None, [{"event": "base_ref_changed", "created_at": PUSHED}]))
 
     def test_first_seen_is_the_earliest_check_suite(self):
         suites = [{"created_at": "2026-11-07T10:00:00Z"}, {"created_at": "2026-11-07T09:00:00Z"}, {}]
@@ -214,6 +232,10 @@ class Gate(unittest.TestCase):
         code, out = run_main(pushed_later)
         self.assertEqual(code, 1)
         self.assertIn("before the latest commit", out)
+        retargeted = FakeAPI(prs=[pr(base="main", labels=["dan-approved"])], files=WORKFLOW,
+                             events={7: [labelled("dan-approved", "dfakkeldy"),
+                                         {"event": "base_ref_changed", "created_at": "2026-11-07T10:10:00Z"}]})
+        self.assertEqual(run_main(retargeted)[0], 1)
 
     def test_needs_dan_promotions_and_a_removed_hold_fail(self):
         self.assertEqual(run_main(FakeAPI(prs=[pr(labels=["needs-dan"])]))[0], 1)
@@ -242,10 +264,12 @@ class Gate(unittest.TestCase):
             json.dump({"pull_request": {"number": 7, "head": {"sha": SHA}}}, event)
         self.addCleanup(os.unlink, event.name)
         env = {"GITHUB_EVENT_PATH": event.name, "GITHUB_REPOSITORY": REPO, "GITHUB_STEP_SUMMARY": ""}
-        out = io.StringIO()
-        with redirect_stdout(out), mock.patch.dict(os.environ, env):
+        out, waits = io.StringIO(), []
+        with redirect_stdout(out), mock.patch.dict(os.environ, env), \
+                mock.patch.object(merge_gate.time, "sleep", waits.append):
             self.assertEqual(merge_gate.main([], get=fake), 1)
         self.assertIn("no open PR has", out.getvalue())
+        self.assertEqual(waits, [5, 5])  # asked three times before failing
 
     def test_the_commit_comes_from_the_event(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as event:

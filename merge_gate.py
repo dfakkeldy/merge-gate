@@ -17,18 +17,22 @@ The tiers come from merge_policy.json. classify() is shared with land_pr.py, the
 that lands agents' PRs, which keeps a byte-identical copy of this file and the policy.
 Python 3.9 or newer, standard library only.
 """
-import argparse, json, os, re, sys, urllib.error, urllib.parse, urllib.request
+import argparse, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
 
 POLICY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_policy.json")
 BOT_AUTHORS = {"app/github-actions", "github-actions"}
 MAX_FILES = 3000  # GitHub's PR files API stops here
+# PR events that change what an approval covered, on GitHub's clock.
+RESHAPED = {"head_ref_force_pushed", "base_ref_changed", "automatic_base_change_succeeded"}
 
 
 def load_policy(path=POLICY_FILE, local=None):
     """The policy, plus the per-repo entries of an optional local file. A local file can
-    only add: new repos, new keys, more list items. It can't change or remove anything."""
+    only add: new repos, new keys, more list items. It can't change or remove anything.
+    Repo names are lower-cased first, so a different spelling can't slip past that rule."""
     with open(path) as f:
         policy = json.load(f)
+    policy["repos"] = {k.lower(): v for k, v in policy.get("repos", {}).items()}
     if not local or not os.path.exists(local):
         return policy
     with open(local) as f:
@@ -36,8 +40,9 @@ def load_policy(path=POLICY_FILE, local=None):
     unknown = sorted(set(extra) - {"_doc", "repos"})
     if unknown:
         raise ValueError(f"{local} may only hold per-repo entries, not {unknown}")
-    repos = policy.setdefault("repos", {})
+    repos = policy["repos"]
     for repo, keys in extra.get("repos", {}).items():
+        repo = repo.lower()
         merged = dict(repos.get(repo, {}))
         for key, value in keys.items():
             if key not in merged:
@@ -127,12 +132,22 @@ def first_seen(suites):
     return min(times) if times else None
 
 
+def shaped_since(commit_seen, events):
+    """When the PR took its current shape: the later of its head commit's first check
+    suite and its last force-push or change of base. None when the commit's time is
+    unknown, so an approval is never tied to a guess."""
+    if not commit_seen:
+        return None
+    return max([commit_seen] + [e["created_at"] for e in events
+                                if e.get("event") in RESHAPED and e.get("created_at")])
+
+
 def dan_approved(repo, labels, events, policy, since):
     """(approved, why). Dan approves by adding the approved label from his own account
-    (the repo owner) after the PR's head commit appeared (since, from first_seen), so the
-    approval covers the commit he saw. A label added by an agent's GitHub App
-    (name[bot]) doesn't count. One added with Dan's own token can't be told apart from
-    his; the agents' instructions and Bash guard forbid that."""
+    (the repo owner) after the PR took its current shape (since, from shaped_since), so
+    the approval covers the commit and base he saw. A label added by an agent's GitHub
+    App (name[bot]) doesn't count. One added with Dan's own token can't be told apart
+    from his; the agents' rules forbid that and their Bash guard flags it."""
     label, owner = policy["dan"]["approved_label"], repo.split("/")[0]
     if label not in labels:
         return False, ""
@@ -144,7 +159,8 @@ def dan_approved(repo, labels, events, policy, since):
     if not since:
         return False, f"{label} can't be tied to a commit (no record of when the head was pushed)"
     if (last.get("created_at") or "") <= since:
-        return False, f"{label} was added before the latest commit; Dan removes it and adds it again to approve that"
+        return False, (f"{label} was added before the latest commit, force-push or change of base; "
+                       "Dan removes it and adds it again to approve that")
     return True, f"approved: {who} added {label} after the latest commit"
 
 
@@ -187,7 +203,7 @@ def author_of(user):
     return login
 
 
-def judge_pr(repo, pr, policy, get, has_nightly, since):
+def judge_pr(repo, pr, policy, get, has_nightly, commit_seen):
     """(passed, tier, reasons) for one open PR."""
     number = pr["number"]
     files = [{"path": f["filename"], "previous": f.get("previous_filename"), "status": f["status"]}
@@ -200,21 +216,27 @@ def judge_pr(repo, pr, policy, get, has_nightly, since):
         return True, tier, reasons
     if policy["dan"]["label"] not in [label["name"] for label in pr["labels"]] and policy["dan"]["label"] in labels:
         reasons.append(f"{policy['dan']['label']} was removed, but it holds until Dan approves")
-    approved, why = dan_approved(repo, labels, events, policy, since)
+    approved, why = dan_approved(repo, labels, events, policy, shaped_since(commit_seen, events))
     return approved, tier, reasons + ([why] if why else [])
 
 
 def gate(repo, sha, policy, get):
     """(passed, lines) for one commit. Branch protection reads the check from the commit,
     so every open PR whose head is this commit must pass."""
-    prs = [p for p in get(f"repos/{repo}/pulls?state=open&per_page=100", paginate=True) if p["head"]["sha"] == sha]
-    if not prs:
-        return False, [f"no open PR has {sha[:10]} as its head; the run for the PR's new head decides"]
+    for attempt in range(3):  # the PR list can lag a moment behind a push
+        prs = [p for p in get(f"repos/{repo}/pulls?state=open&per_page=100", paginate=True)
+               if p["head"]["sha"] == sha]
+        if prs:
+            break
+        if attempt < 2:
+            time.sleep(5)
+    else:
+        return False, [f"no open PR has {sha[:10]} as its head. If one does now, re-run this check"]
     has_nightly = branch_exists(get, repo, "nightly")
-    since = first_seen(get(f"repos/{repo}/commits/{sha}/check-suites?per_page=100").get("check_suites", []))
+    commit_seen = first_seen(get(f"repos/{repo}/commits/{sha}/check-suites?per_page=100").get("check_suites", []))
     passed, lines = True, []
     for pr in sorted(prs, key=lambda p: p["number"]):
-        ok, tier, reasons = judge_pr(repo, pr, policy, get, has_nightly, since)
+        ok, tier, reasons = judge_pr(repo, pr, policy, get, has_nightly, commit_seen)
         passed = passed and ok
         lines.append(f"#{pr['number']} into {pr['base']['ref']}: {'passes' if ok else 'waits for Dan'} "
                      f"(tier {tier}: {'; '.join(reasons)})")
