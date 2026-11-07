@@ -25,3 +25,4 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
+# Trial PR: a stop-list change (a workflow comment) to prove the gate holds it.
