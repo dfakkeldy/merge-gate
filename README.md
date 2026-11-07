@@ -28,8 +28,8 @@ of both, so they agree on every repository that uses only this policy.
 
 ## How it stays safe
 
-- It runs on `pull_request_target`, so GitHub runs the workflow file from the base
-  branch. A PR can't edit its own gate.
+- It runs on `pull_request_target`, so GitHub runs the workflow file from the
+  repository's default branch, whatever the PR's base. A PR can't edit its own gate.
 - It never checks out or runs the PR's code. It reads PRs, files, label history and
   check suites through the REST API with a read-only token, and runs Python in
   isolated mode (`-I`), so no file beside the script can stand in for a library.
@@ -48,9 +48,13 @@ of both, so they agree on every repository that uses only this policy.
 ## Add it to a repository
 
 1. Copy [`.github/workflows/merge-gate.yml`](.github/workflows/merge-gate.yml) unchanged
-   into every branch that will require the check, and merge it. `pull_request_target`
-   runs the file from the PR's base, so a PR into a branch without it gets no run,
-   and a retargeted PR keeps its old result.
+   into the repository's **default branch** and merge it. GitHub starts
+   `pull_request_target` from the default branch for PRs into any branch, so a copy
+   only on another branch (say `nightly`, where `main` is the default) never runs
+   ([#4](https://github.com/dfakkeldy/merge-gate/pull/4) showed a PR into a branch
+   without the file still running the gate). Where the
+   integration branch isn't the default, put the same file on both, so promotions
+   merge it without conflict.
 2. Then require the check (a check that can't run yet would block every PR):
 
    ```bash
