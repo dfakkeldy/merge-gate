@@ -1,0 +1,12 @@
+name: Merge gate
+description: Fails a pull request on the merge stop list until the repository owner labels it dan-approved.
+author: dfakkeldy
+runs:
+  using: composite
+  steps:
+    # Reads the PR through the API only. Nothing from the PR is checked out or run.
+    - name: Judge the pull request
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 "$GITHUB_ACTION_PATH/merge_gate.py"

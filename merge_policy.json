@@ -1,0 +1,67 @@
+{
+  "_doc": [
+    "Risk tiers for the Merge gate check and for land_pr.py. The tier is set by the change, not by who wrote it.",
+    "dan: waits for Dan. The Merge gate check fails until the repository owner adds the approved_label. low: only prose and images. normal: everything else. The gate passes low and normal; land_pr.py also wants an independent review line for normal.",
+    "Globs: ** crosses folders, * and ? stay inside one folder. A rename is judged by both its old and new path.",
+    "Per repo: dan adds stop-list paths; low_heads names automation branches whose workflow-opened PRs are low; no_ci_ok lets land_pr.py land a PR when the repo's path-filtered CI doesn't run for it; own_gate leaves stop-list PRs to the repo's own merge job.",
+    "This file and merge_gate.py are on the stop list of this repository, so a PR can't loosen the rules that judge it."
+  ],
+  "dan": {
+    "paths": [
+      ".github/workflows/**",
+      ".github/actions/**",
+      ".github/scripts/**",
+      ".github/CODEOWNERS",
+      ".github/release-inputs.json",
+      "**/fastlane/**",
+      "**/Fastfile",
+      "**/Matchfile",
+      "**/Appfile",
+      "**/*.entitlements",
+      "**/ExportOptions*.plist",
+      "**/.env",
+      "**/.env.*",
+      "**/*.pem",
+      "**/*.p8",
+      "**/*.p12",
+      "**/*.mobileprovision",
+      "**/.claude/**",
+      "**/.codex/**",
+      "**/.cursor/**",
+      ".github/copilot-instructions.md"
+    ],
+    "promotion_bases": ["weekly", "main"],
+    "max_removed_files": 25,
+    "label": "needs-dan",
+    "approved_label": "dan-approved"
+  },
+  "low": {
+    "paths": [
+      "**/*.md",
+      "**/*.txt",
+      "**/*.png",
+      "**/*.jpg",
+      "**/*.jpeg",
+      "**/*.webp",
+      "**/*.gif",
+      "**/*.svg"
+    ],
+    "except": [
+      "**/CLAUDE.md",
+      "**/CLAUDE.*.md",
+      "**/AGENTS.md",
+      "**/AGENTS.*.md",
+      "**/SKILL.md",
+      "**/REVIEW.md",
+      "**/*instructions*.md",
+      "**/requirements*.txt",
+      "**/CMakeLists.txt"
+    ]
+  },
+  "repos": {
+    "dfakkeldy/merge-gate": {
+      "dan": ["merge_gate.py", "merge_policy.json", "action.yml"],
+      "note": "This repository is the gate. Every repo runs its main branch, so a change here changes the rule everywhere."
+    }
+  }
+}
