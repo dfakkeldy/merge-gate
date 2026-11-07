@@ -31,7 +31,8 @@
       "**/.codex/**",
       "**/.cursor",
       "**/.cursor/**",
-      ".github/copilot-instructions.md"
+      ".github/copilot-instructions.md",
+      "**/REVIEW.md"
     ],
     "promotion_bases": ["weekly", "main"],
     "max_removed_files": 25,
@@ -55,7 +56,6 @@
       "**/AGENTS.md",
       "**/AGENTS.*.md",
       "**/SKILL.md",
-      "**/REVIEW.md",
       "**/*instructions*.md",
       "**/requirements*.txt",
       "**/CMakeLists.txt"
