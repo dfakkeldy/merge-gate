@@ -2,6 +2,7 @@
   "_doc": [
     "Risk tiers for the Merge gate check and for land_pr.py. The tier is set by the change, not by who wrote it.",
     "dan: waits for Dan. The Merge gate check fails until the repository owner adds the approved_label after the latest commit. Once added, label (needs-dan) still counts after someone removes it. low: only prose and images. normal: everything else. The gate passes low and normal; land_pr.py also wants an independent review line for normal.",
+    "dan.relief lets three stop-list changes through without Dan, since none can change what runs: reference (a file byte-identical to the same path in the reference repo at ref), comment_only (files with these suffixes where only whole-line comments or blank lines outside block scalars changed) and back_merge (a PR into nightly whose every changed file already matches main or weekly, and that nightly hadn't changed since they last shared history). Remove a key to switch its rule off. A needs-dan label still holds.",
     "Globs: ** crosses folders, * and ? stay inside one folder. A rename is judged by both its old and new path.",
     "Per repo: dan adds stop-list paths; low_heads names automation branches whose workflow-opened PRs are low; no_ci_ok lets land_pr.py land a PR when the repo's path-filtered CI doesn't run for it; own_gate leaves stop-list PRs to the repo's own merge job.",
     "Everything in this repository is on its own stop list, so a PR can't loosen the rules that judge it."
@@ -37,7 +38,12 @@
     "promotion_bases": ["weekly", "main"],
     "max_removed_files": 25,
     "label": "needs-dan",
-    "approved_label": "dan-approved"
+    "approved_label": "dan-approved",
+    "relief": {
+      "reference": {"repo": "dfakkeldy/merge-gate", "ref": "main", "paths": [".github/workflows/merge-gate.yml"]},
+      "comment_only": [".yml", ".yaml"],
+      "back_merge": true
+    }
   },
   "low": {
     "paths": [
