@@ -41,10 +41,41 @@ class Tiers(unittest.TestCase):
         for path in (".github/workflows/ci.yml", "ios/fastlane/Fastfile", "App/App.entitlements",
                      ".env.production", "keys/AuthKey.p8", ".claude/settings.json",
                      ".claude/commands/ship.md", ".codex/hooks.json", ".github/copilot-instructions.md",
-                     "fastlane/screenshots/en-US/1.png", ".claude", "app/.cursor", "REVIEW.md",
+                     "fastlane/Snapfile", "fastlane/test/release_lane_test.rb", "fastlane/lib/x.rb",
+                     "fastlane/metadata/review_information/demo_user.txt", "fastlane/plugins/p.rb",
+                     ".claude", "app/.cursor", "REVIEW.md",
                      "web/REVIEW.md"):
             with self.subTest(path):
                 self.assertEqual(tier([path, "src/app.ts"])[0], "dan")
+
+    def test_store_text_and_screenshots_go_to_a_reviewer(self):
+        for path in ("fastlane/metadata/en-US/description.txt", "fastlane/metadata/fr-CA/name.txt",
+                     "fastlane/metadata/zh-Hans/keywords.txt", "fastlane/metadata/copyright.txt",
+                     "fastlane/metadata/default/name.txt", "fastlane/testflight/what_to_test.txt",
+                     "ios/fastlane/testflight/en-US/whats_new.txt", "fastlane/screenshots/en-US/1.png",
+                     "fastlane/screenshots/1.jpeg", "fastlane/screenshots/en-US/README.md",
+                     "fastlane/metadata/es-419/name.txt"):
+            with self.subTest(path):
+                self.assertEqual(tier([path])[0], "normal")
+        self.assertEqual(tier(["fastlane/README.md"])[0], "low")
+
+    def test_an_exception_frees_one_pattern_and_only_store_text(self):
+        for path in ("fastlane/testflight/AuthKey.p8", "fastlane/metadata/en-US/.env",
+                     "fastlane/testflight/App.entitlements", "fastlane/testflight/Fastfile",
+                     "fastlane/testflight/REVIEW.md", ".github/actions/fastlane/testflight/action.yml",
+                     ".codex/fastlane/testflight/hooks.json", ".claude/skills/fastlane/README.md",
+                     ".claude/fastlane/screenshots/rules.md", "fastlane/testflight/lanes.rb",
+                     "fastlane/testflight/review_information/demo_password.txt",
+                     "fastlane/metadata/review_information/notes.txt", "fastlane/screenshots/Framefile.json",
+                     "fastlane/screenshots/run.sh", "fastlane/metadata/en-US/x.rb"):
+            with self.subTest(path):
+                self.assertEqual(tier([path])[0], "dan")
+
+    def test_a_repos_own_list_still_holds_what_dan_except_frees(self):
+        policy = dict(POLICY, repos={REPO: {"dan": ["**"]}})
+        found = merge_gate.classify(REPO, "nightly", [], [{"path": "fastlane/README.md", "status": "modified"}],
+                                    True, policy)
+        self.assertEqual(found[0], "dan")
 
     def test_rename_out_of_the_stop_list_still_counts(self):
         self.assertEqual(tier(renamed=(".github/workflows/ci.yml", "old/ci.yml"))[0], "dan")
@@ -188,7 +219,8 @@ class FakeAPI:
             return [dict(p) for p in self.prs]
         if "/pulls/" in path and "/files" in path:
             number = int(path.split("/pulls/")[1].split("/")[0])
-            return [{"filename": f, "status": "modified"} for f in self.files.get(number, ["src/app.py"])]
+            return [f if isinstance(f, dict) else {"filename": f, "status": "modified"}
+                    for f in self.files.get(number, ["src/app.py"])]
         if path.endswith("/pulls/7"):
             return dict(self.prs[0])
         if path.endswith("/branches/nightly"):

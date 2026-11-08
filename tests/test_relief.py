@@ -30,6 +30,7 @@ jobs:
             You were woken in Dan's repo.
 
             Never merge, approve, close or delete anything.
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: --max-turns 30
 """
 
@@ -299,8 +300,8 @@ class CommentOnly(unittest.TestCase):
         self.assertNotIn("could not judge", out)
 
 
-MAIN = {"App/a.swift": "v2", ".github/workflows/ci.yml": "ci v2", "README.md": "r"}
-SHARED = {"App/a.swift": "v1", ".github/workflows/ci.yml": "ci v1", "README.md": "r"}
+MAIN = {"App/a.swift": "v2", ".github/workflows/ci.yml": "secrets.K ci v2", "README.md": "r"}
+SHARED = {"App/a.swift": "v1", ".github/workflows/ci.yml": "secrets.K ci v1", "README.md": "r"}
 
 
 def back_merge_api(head, nightly=None, labels=(), files=(CI, "App/a.swift"), base="nightly", main=MAIN, shared=None):
@@ -318,15 +319,15 @@ class BackMerge(unittest.TestCase):
         self.assertIn("a back-merge: every file it changes already matches main", out)
 
     def test_a_conflict_resolution_that_mixes_both_sides_waits(self):
-        mixed = dict(MAIN, **{CI: "ci v2 plus nightly's line"})
+        mixed = dict(MAIN, **{CI: "secrets.K ci v2 plus nightly's line"})
         self.assertEqual(run_main(back_merge_api(head=mixed))[0], 1)
 
     def test_taking_mains_copy_over_nightlys_own_work_waits(self):
-        nightly = dict(SHARED, **{CI: "ci v1 with nightly's change"})
+        nightly = dict(SHARED, **{CI: "secrets.K ci v1 with nightly's change"})
         self.assertEqual(run_main(back_merge_api(head=dict(MAIN), nightly=nightly))[0], 1)
 
     def test_a_mode_change_waits(self):
-        head = dict(MAIN, **{CI: ("100755", "ci v2")})
+        head = dict(MAIN, **{CI: ("100755", "secrets.K ci v2")})
         self.assertEqual(run_main(back_merge_api(head=head))[0], 1)
 
     def test_stop_list_files_carried_from_main_pass_beside_a_mixed_prose_file(self):
@@ -340,7 +341,7 @@ class BackMerge(unittest.TestCase):
         self.assertIn("tier low", out)
 
     def test_a_mixed_stop_list_file_beside_carried_ones_still_waits(self):
-        lane_docs = "fastlane/README.md"
+        lane_docs = "fastlane/Snapfile"
         nightly = dict(SHARED, **{lane_docs: "lanes, nightly"})
         main = dict(MAIN, **{lane_docs: "lanes, main"})
         head = dict(main, **{lane_docs: "lanes, both"})
@@ -348,7 +349,7 @@ class BackMerge(unittest.TestCase):
                              shared=dict(SHARED, **{lane_docs: "lanes"}))
         code, out = run_main(api)
         self.assertEqual(code, 1)
-        self.assertIn("fastlane/README.md", out)
+        self.assertIn("fastlane/Snapfile", out)
 
     def test_a_removed_file_must_be_gone_from_main_too(self):
         old_flow = ".github/workflows/old.yml"
@@ -415,6 +416,151 @@ class Switches(unittest.TestCase):
                 del policy["dan"]["relief"][key]
                 exempt, back, _ = merge_gate.relief(REPO, base, SHA, files, True, policy, api)
                 self.assertFalse(exempt or back)
+
+
+PLAIN = """\
+name: CI
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+"""
+KEY = PLAIN.replace("make test", "curl -H ${{ secrets.DEPLOY_KEY }} deploy.example")
+YML = ".github/workflows/ci.yml"
+
+
+def workflow_api(after, before=PLAIN, tip=None, path=YML, status="modified", **kw):
+    head = {path: after} if after is not None else {}
+    then = {path: before} if before is not None else {}
+    now = then if tip is None else {path: tip}
+    return ReliefAPI(files={7: [{"filename": path, "status": status}]},
+                     commits={SHA: head, "mergebase": then, "tip": now},
+                     branches={(REPO, "nightly"): "tip"}, **kw)
+
+
+class WorkflowPower(unittest.TestCase):
+    def test_a_workflow_with_no_power_has_none(self):
+        self.assertIsNone(merge_gate.workflow_power(PLAIN))
+        self.assertIsNone(merge_gate.workflow_power(PLAIN + "        env: {T: '${{ secrets.GITHUB_TOKEN }}'}\n"))
+        self.assertIsNone(merge_gate.workflow_power(PLAIN + "      - run: python -c 'f.write(1)'; prettier --write .\n"))
+
+    def test_prose_about_secrets_in_a_comment_doesnt_count(self):
+        for text in ("# No secrets; nothing is deployed.", "# No secrets: the data is synthetic.",
+                     "# Fails a PR that touches the stop list (CI, secrets, agents).", "# No secrets."):
+            with self.subTest(text):
+                self.assertIsNone(merge_gate.workflow_power(text + "\n" + PLAIN))
+
+    def test_every_way_to_reach_a_secret_counts(self):
+        for text in ("${{ secrets.K }}", "${{ SECRETS.K }}", "${{ secrets['K'] }}", "${{ toJSON(secrets) }}",
+                     "secrets: inherit", "      - secrets: inherit", "{secrets: inherit}", '"secrets": inherit',
+                     "# ${{ secrets.K }}", "${{ secrets.GITHUB_TOKEN_2 }}", "echo $KEY # secrets.K",
+                     "${{ format('{0}',\n  secrets) }}"):
+            with self.subTest(text):
+                self.assertEqual(merge_gate.workflow_power(PLAIN + text + "\n"), "uses a secret")
+
+    def test_write_access_counts_in_any_shape(self):
+        for text in ("permissions: write-all", "permissions:\n  contents: write", "permissions: {pages: write}",
+                     "permissions:\n  id-token: 'write'", "x: &w write"):
+            with self.subTest(text):
+                self.assertEqual(merge_gate.workflow_power(PLAIN + text + "\n"), "asks for write access")
+
+    def test_privileged_triggers_runners_and_escapes_count(self):
+        for text in ("on: [pull_request_target]\n", "on:\n  workflow_run:\n", "on:\n  workflow_call:\n"):
+            with self.subTest(text):
+                self.assertIn("more rights", merge_gate.workflow_power(text))
+        for text in ("    name: Merge gate\n", "name: 'Claude Review'\n"):
+            with self.subTest(text):
+                self.assertIn("check the gates trust", merge_gate.workflow_power(text))
+        self.assertIn("own machine", merge_gate.workflow_power("runs-on: [self-hosted, macos]\n"))
+        self.assertIn("escape", merge_gate.workflow_power('run: "\\x73ecrets"\n'))
+        self.assertIn("characters", merge_gate.workflow_power("run: a\u00a0b\x85\n"))
+
+
+class PlainWorkflow(unittest.TestCase):
+    def test_a_plain_edit_goes_to_a_reviewer_not_dan(self):
+        code, out = run_main(workflow_api(PLAIN.replace("make test", "make test lint")))
+        self.assertEqual(code, 0)
+        self.assertIn("tier normal", out)
+        self.assertIn("a reviewer clears it", out)
+
+    def test_a_new_plain_workflow_goes_to_a_reviewer(self):
+        code, out = run_main(workflow_api(PLAIN, before=None, path=".github/workflows/lint.yaml", status="added"))
+        self.assertEqual(code, 0)
+        self.assertIn("tier normal", out)
+
+    def test_power_before_after_or_on_the_tip_waits(self):
+        for name, api in (("gains", workflow_api(KEY)), ("had", workflow_api(PLAIN, before=KEY)),
+                          ("tip", workflow_api(PLAIN + "# x\n", tip=KEY)),
+                          ("new", workflow_api(KEY, before=None, path=".github/workflows/x.yml", status="added"))):
+            with self.subTest(name):
+                code, out = run_main(api)
+                self.assertEqual(code, 1)
+                self.assertIn("uses a secret, so Dan decides", out)
+
+    def test_an_edit_that_weakens_the_run_waits_but_one_that_keeps_it_doesnt(self):
+        for marker in ("continue-on-error: true", "make test || true", "make test ||true", "make test || :",
+                       "make test || exit 0", "set +e", "if: false", "if:  false", "if: 'false'", "if: ${{ false }}"):
+            with self.subTest(marker):
+                code, out = run_main(workflow_api(PLAIN + f"      - run: x\n        {marker}\n"))
+                self.assertEqual(code, 1)
+                self.assertIn("so Dan decides", out)
+        had = PLAIN + "      - run: x\n        continue-on-error: true\n"
+        self.assertEqual(run_main(workflow_api(had.replace("make test", "make lint"), before=had))[0], 0)
+
+    def test_names_and_shapes_it_wont_clear(self):
+        for path in (".github/workflows/secret-scan.yml", ".github/workflows/Security.yml",
+                     ".github/workflows/codeql.yml", ".github/workflows/ci.yml.bak", ".github/workflows/a/ci.yml"):
+            with self.subTest(path):
+                self.assertEqual(run_main(workflow_api(PLAIN, path=path))[0], 1)
+
+    def test_a_full_back_merge_doesnt_blame_a_workflow_it_passes(self):
+        api = back_merge_api(head=dict(MAIN))
+        code, out = run_main(api)
+        self.assertEqual(code, 0)
+        self.assertNotIn("so Dan decides", out)
+
+    def test_a_plain_workflow_isnt_low_tier_on_an_automation_branch(self):
+        policy = dict(POLICY, repos={REPO: {"low_heads": ["automation/**"]}})
+        found = merge_gate.classify(REPO, "nightly", [], [{"path": YML, "status": "modified"}], True, policy,
+                                    "automation/x", "app/github-actions", plain={YML})
+        self.assertEqual(found[0], "normal")
+
+    def test_a_symlink_a_mode_change_a_rename_or_a_delete_waits(self):
+        self.assertEqual(run_main(workflow_api(("120000", PLAIN)))[0], 1)
+        self.assertEqual(run_main(workflow_api(PLAIN, before=("120000", PLAIN)))[0], 1)
+        self.assertEqual(run_main(workflow_api(None, status="removed"))[0], 1)
+        renamed = workflow_api(PLAIN)
+        renamed.files = {7: [{"filename": YML, "previous_filename": ".github/workflows/old.yml", "status": "renamed"}]}
+        self.assertEqual(run_main(renamed)[0], 1)
+
+    def test_github_errors_keep_it_on_the_list(self):
+        for fail in ("/git/trees/", "/git/blobs/", "/compare/"):
+            with self.subTest(fail):
+                code, out = run_main(workflow_api(PLAIN.replace("make test", "make lint"), fail=fail))
+                self.assertEqual(code, 1)
+        unknown = merge_gate.plain_workflows(REPO, "gone", SHA, [{"path": YML, "status": "modified"}], set(), POLICY,
+                                             workflow_api(PLAIN))  # the base branch isn't there
+        self.assertEqual(unknown, (set(), []))
+
+    def test_a_repos_own_stop_list_and_needs_dan_still_hold(self):
+        policy = dict(POLICY, repos={REPO: {"dan": [".github/**"]}})
+        plain, _ = merge_gate.plain_workflows(REPO, "nightly", SHA, [{"path": YML, "status": "modified"}], set(),
+                                              policy, workflow_api(PLAIN.replace("make test", "make lint")))
+        self.assertEqual(plain, set())
+        held = workflow_api(PLAIN.replace("make test", "make lint"))
+        held.prs = [pr(labels=["needs-dan"])]
+        self.assertEqual(run_main(held)[0], 1)
+
+    def test_the_gate_repo_keeps_everything_on_its_list(self):
+        api = ReliefAPI(prs=[pr()], files={7: [{"filename": YML, "status": "modified"}]},
+                        commits={SHA: {YML: PLAIN.replace("make test", "make lint")}, "mergebase": {YML: PLAIN},
+                                 "tip": {YML: PLAIN}},
+                        branches={(REF_REPO, "main"): "tip", (REF_REPO, "nightly"): "tip"})
+        self.assertEqual(run_main(api, ("--repo", REF_REPO, "--pr", "7"))[0], 1)
 
 
 if __name__ == "__main__":

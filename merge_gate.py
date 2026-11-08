@@ -31,6 +31,10 @@ without Dan (each one switched on by the policy's dan.relief):
                 mixes both sides, or that would drop nightly's own work, fails and waits.
 A needs-dan label still holds every one of them.
 
+A workflow that has no power over anything but its own run needs a reviewer, not Dan:
+plain_workflows(). Every other workflow stays on the stop list, so a new name can't slip
+through. See workflow_power() for what counts as power.
+
 Python 3.9 or newer, standard library only.
 """
 import argparse, base64, binascii, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
@@ -97,18 +101,25 @@ def repo_extra(repo, policy):
     return {k.lower(): v for k, v in policy.get("repos", {}).items()}.get(repo.lower(), {})
 
 
-def stop_paths(repo, policy):
-    return policy["dan"]["paths"] + repo_extra(repo, policy).get("dan", [])
+def stop_hit(path, repo, policy):
+    """The stop-list pattern that holds this path, or None. dan.except frees a path from one
+    named pattern only, so a key file among the store text is still held by its own pattern.
+    A repo's own patterns aren't touched."""
+    dan = policy["dan"]
+    free = dan.get("except", {})
+    hit = next((p for p in dan["paths"] if glob_re(p).match(path) and not matches(path, free.get(p, ()))), None)
+    return hit or matches(path, repo_extra(repo, policy).get("dan", []))
 
 
-def classify(repo, base, labels, files, has_nightly, policy, head="", author="", exempt=(), back_merge=None):
+def classify(repo, base, labels, files, has_nightly, policy, head="", author="", exempt=(), back_merge=None,
+             plain=()):
     """(tier, reasons). files: [{"path", "previous", "status"}]; previous is set on renames.
     A repo can name automation branches whose PRs, opened by a workflow, are low tier.
     exempt and back_merge come from relief(): stop-list paths whose change can't alter what
-    runs, and the ladder branch a pure back-merge into nightly already matches."""
+    runs, and the ladder branch a pure back-merge into nightly already matches. plain comes
+    from plain_workflows(): workflows that leave the stop list but still need a reviewer."""
     dan, low = policy["dan"], policy["low"]
     extra = repo_extra(repo, policy)
-    dan_paths = stop_paths(repo, policy)
     reasons = []
     if dan["label"] in labels:
         reasons.append(f"labelled {dan['label']}")
@@ -121,7 +132,7 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="",
     paths = sorted({p for f in files for p in (f["path"], f.get("previous")) if p})
     hits = {}
     for path in paths:
-        hit = None if path in exempt else matches(path, dan_paths)
+        hit = None if path in exempt or path in plain else stop_hit(path, repo, policy)
         if hit:
             hits.setdefault(hit, []).append(path)
     for pattern, hit_paths in hits.items():
@@ -135,7 +146,7 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="",
     if paths and all(p in exempt or (matches(p, low["paths"]) and not matches(p, low["except"])) for p in paths):
         return "low", ["only prose and images" if not exempt else
                        "only prose and images, and stop-list files that can't change what runs"]
-    if head and author in BOT_AUTHORS and matches(head, extra.get("low_heads", [])):
+    if head and author in BOT_AUTHORS and matches(head, extra.get("low_heads", [])) and not plain:
         return "low", [f"opened by the repo's automation ({head})"]
     return "normal", ["code or config outside the stop list"]
 
@@ -294,10 +305,11 @@ def dan_approved(repo, labels, events, policy, since):
     (the repo owner) after the PR took its current shape (since, from shaped_since), so
     the approval covers the commit and base he saw. A label added by an agent's GitHub
     App (name[bot]) doesn't count. One added with Dan's own token can't be told apart
-    from his; the agents' rules forbid that and their Bash guard flags it. The one
-    sanctioned exception: Dan's 👍 on the PR steward's daily digest approves the PRs it
-    lists, and the steward then adds this label with his token, to each PR whose head is
-    still the commit the digest listed."""
+    from his; the agents' rules forbid that and their Bash guard flags it. Two sanctioned
+    exceptions: Dan's 👍 on the PR steward's daily digest approves the PRs it lists, and
+    the steward then adds this label with his token, to each PR whose head is still the
+    commit the digest listed; and Dan's own yes in chat, naming the PRs, lets the agent
+    he told add it."""
     label, owner = policy["dan"]["approved_label"], repo.split("/")[0]
     if label not in labels:
         return False, ""
@@ -430,8 +442,7 @@ def relief(repo, base, head_sha, files, has_nightly, policy, get, back_merge=Tru
     exempt, back, notes = set(), None, []
     if len(files) >= MAX_FILES:
         return exempt, back, notes
-    stop = stop_paths(repo, policy)
-    hits = [f for f in files if matches(f["path"], stop) and f["status"] in ("modified", "added")
+    hits = [f for f in files if stop_hit(f["path"], repo, policy) and f["status"] in ("modified", "added")
             and not f.get("previous")]
     try:
         trees = Trees(get, repo)
@@ -483,6 +494,79 @@ def author_of(user):
     return login
 
 
+# --- workflows with no power ------------------------------------------------------
+
+# What lets a workflow reach past its own run. Whole-text and blunt on purpose: a false alarm
+# costs Dan a tap, a miss costs a leaked key. A `#` line can't be skipped, since GitHub expands
+# ${{ }} in a `run:` block's comments too. `secrets.GITHUB_TOKEN` is taken out first: it is
+# the run's own token, whose rights the write check below covers.
+_POWER = (
+    # secrets.X, secrets['X'], anything inside ${{ }}, and the key in `secrets: inherit`. Not prose
+    # in a comment, which many plain workflows have: "No secrets; nothing is deployed."
+    ("uses a secret", re.compile(r"""\bsecrets\.[a-z_]|\bsecrets\[|\$\{\{(?s:(?:(?!\}\}).)*?)\bsecrets\b"""
+                                 r"""|(?:^|[{,])\s*(?:-\s+)?["']?secrets["']?\s*:""", re.I | re.M)),
+    ("asks for write access", re.compile(r"(?<![-.\w])write(?:-all)?\b")),
+    # A called workflow gets its caller's token, so its text alone can't show what it may do.
+    ("can run with more rights than a PR's own run", re.compile(
+        r"\b(?:pull_request_target|workflow_run|workflow_call)\b", re.I)),
+    # Branch protection and land_pr.py trust these check names from any Actions job.
+    ("carries the name of a check the gates trust", re.compile(r"\b(?:merge gate|claude review)\b", re.I)),
+    ("runs on Dan's own machine", re.compile(r"\bself-hosted\b", re.I)),
+    ("hides text in a YAML escape", re.compile(r"\\[xuUNLP_]")),
+)
+_OWN_TOKEN = re.compile(r"\bsecrets\.GITHUB_TOKEN\b", re.I)
+# Ways to ignore a failure or switch a step off. Counted, so an edit may keep an old one.
+_WEAKENS = re.compile(r"""continue-on-error|\|\|\s*(?:true\b|:|exit\s+0\b)|\bset\s+\+e\b"""
+                      r"""|\bif:\s*(?:\$\{\{\s*)?['"]?false\b""", re.I)
+
+
+def workflow_power(text):
+    """Why this workflow's text can reach past its own run, or None when it can't."""
+    if _unprintable(text) or any(c in text for c in _ODD_BREAKS):
+        return "holds characters that can't be read safely"
+    bare = _OWN_TOKEN.sub("", text)
+    return next((why for why, pattern in _POWER if pattern.search(bare)), None)
+
+
+def plain_workflows(repo, base, head_sha, files, exempt, policy, get):
+    """(paths, notes): the workflows this PR changes or adds that have no power before, after
+    or on the base's tip, and that the edit doesn't weaken. They leave the stop list but stay
+    normal tier, so a reviewer still reads them. Any doubt, a GitHub error included, keeps a
+    workflow on the list. A repo's own stop-list patterns and dan.relief's held_names still hold."""
+    rule = policy["dan"].get("relief", {}).get("plain_workflow") or {}
+    own = repo_extra(repo, policy).get("dan", [])
+    todo = [f["path"] for f in files if f["status"] in ("modified", "added") and not f.get("previous")
+            and f["path"] not in exempt and matches(f["path"], rule.get("paths", []))
+            and not matches(f["path"].lower(), rule.get("held_names", [])) and not matches(f["path"], own)]
+    plain, notes = set(), []
+    if not todo or len(files) >= MAX_FILES:
+        return plain, notes
+    try:
+        trees = Trees(get, repo)
+        tip_sha = branch_sha(get, repo, base)
+        if not tip_sha:
+            return plain, notes
+        then, tip, head = (trees.entries(merge_base(get, repo, tip_sha, head_sha)),
+                           trees.entries(tip_sha), trees.entries(head_sha))
+        for path in todo:
+            copies = (head.get(path), then.get(path), tip.get(path))
+            if not copies[0] or any(c and c[0] not in REGULAR for c in copies):
+                continue
+            after, before, now = (trees.text(c[1]) if c else "" for c in copies)
+            if after is None or before is None or now is None:
+                continue
+            power = workflow_power(after) or workflow_power(before) or workflow_power(now)
+            weak = len(_WEAKENS.findall(after)) > len(_WEAKENS.findall(before))
+            if power or weak:
+                notes.append(f"{path} {power or 'adds a way to ignore a failure'}, so Dan decides")
+                continue
+            plain.add(path)
+            notes.append(f"{path} has no secret, write access or privileged trigger, so a reviewer clears it")
+    except Exception as e:  # noqa: BLE001  (this is optional: any doubt means the workflow waits for Dan)
+        return set(), [f"could not read the workflows ({type(e).__name__}: {one_line(e)}), so they wait for Dan"]
+    return plain, notes
+
+
 def judge_pr(repo, pr, policy, get, has_nightly, commit_seen):
     """(passed, tier, reasons) for one open PR."""
     number = pr["number"]
@@ -494,9 +578,10 @@ def judge_pr(repo, pr, policy, get, has_nightly, commit_seen):
     tier, reasons = classify(*args)
     if tier == "dan" and policy["dan"]["label"] not in labels:  # a held PR stays held
         exempt, back, notes = relief(repo, pr["base"]["ref"], pr["head"]["sha"], files, has_nightly, policy, get)
-        if exempt or back:
-            tier, reasons = classify(*args, exempt=exempt, back_merge=back)
-        reasons = reasons + notes
+        plain, more = plain_workflows(repo, pr["base"]["ref"], pr["head"]["sha"], files, exempt, policy, get)
+        if exempt or back or plain:
+            tier, reasons = classify(*args, exempt=exempt, back_merge=back, plain=plain)
+        reasons = reasons + notes + ([] if back else more)
     if tier != "dan":
         return True, tier, reasons
     if policy["dan"]["label"] not in [label["name"] for label in pr["labels"]] and policy["dan"]["label"] in labels:
