@@ -469,8 +469,12 @@ class WorkflowPower(unittest.TestCase):
                 self.assertEqual(merge_gate.workflow_power(PLAIN + text + "\n"), "asks for write access")
 
     def test_privileged_triggers_runners_and_escapes_count(self):
-        self.assertIn("base branch", merge_gate.workflow_power("on: [pull_request_target]\n"))
-        self.assertIn("base branch", merge_gate.workflow_power("on:\n  workflow_run:\n"))
+        for text in ("on: [pull_request_target]\n", "on:\n  workflow_run:\n", "on:\n  workflow_call:\n"):
+            with self.subTest(text):
+                self.assertIn("more rights", merge_gate.workflow_power(text))
+        for text in ("    name: Merge gate\n", "name: 'Claude Review'\n"):
+            with self.subTest(text):
+                self.assertIn("check the gates trust", merge_gate.workflow_power(text))
         self.assertIn("own machine", merge_gate.workflow_power("runs-on: [self-hosted, macos]\n"))
         self.assertIn("escape", merge_gate.workflow_power('run: "\\x73ecrets"\n'))
         self.assertIn("characters", merge_gate.workflow_power("run: a\u00a0b\x85\n"))
@@ -498,7 +502,8 @@ class PlainWorkflow(unittest.TestCase):
                 self.assertIn("uses a secret, so Dan decides", out)
 
     def test_an_edit_that_weakens_the_run_waits_but_one_that_keeps_it_doesnt(self):
-        for marker in ("continue-on-error: true", "make test || true", "if: false"):
+        for marker in ("continue-on-error: true", "make test || true", "make test ||true", "make test || :",
+                       "make test || exit 0", "set +e", "if: false", "if:  false", "if: 'false'", "if: ${{ false }}"):
             with self.subTest(marker):
                 code, out = run_main(workflow_api(PLAIN + f"      - run: x\n        {marker}\n"))
                 self.assertEqual(code, 1)
@@ -511,6 +516,18 @@ class PlainWorkflow(unittest.TestCase):
                      ".github/workflows/codeql.yml", ".github/workflows/ci.yml.bak", ".github/workflows/a/ci.yml"):
             with self.subTest(path):
                 self.assertEqual(run_main(workflow_api(PLAIN, path=path))[0], 1)
+
+    def test_a_full_back_merge_doesnt_blame_a_workflow_it_passes(self):
+        api = back_merge_api(head=dict(MAIN))
+        code, out = run_main(api)
+        self.assertEqual(code, 0)
+        self.assertNotIn("so Dan decides", out)
+
+    def test_a_plain_workflow_isnt_low_tier_on_an_automation_branch(self):
+        policy = dict(POLICY, repos={REPO: {"low_heads": ["automation/**"]}})
+        found = merge_gate.classify(REPO, "nightly", [], [{"path": YML, "status": "modified"}], True, policy,
+                                    "automation/x", "app/github-actions", plain={YML})
+        self.assertEqual(found[0], "normal")
 
     def test_a_symlink_a_mode_change_a_rename_or_a_delete_waits(self):
         self.assertEqual(run_main(workflow_api(("120000", PLAIN)))[0], 1)

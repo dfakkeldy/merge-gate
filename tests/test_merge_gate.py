@@ -51,23 +51,30 @@ class Tiers(unittest.TestCase):
     def test_store_text_goes_to_a_reviewer_and_screenshots_need_none(self):
         for path in ("fastlane/metadata/en-US/description.txt", "fastlane/metadata/fr-CA/name.txt",
                      "fastlane/metadata/zh-Hans/keywords.txt", "fastlane/metadata/copyright.txt",
-                     "fastlane/testflight/what_to_test.txt", "ios/fastlane/testflight/en-US/whats_new.txt"):
+                     "fastlane/metadata/default/name.txt", "fastlane/testflight/what_to_test.txt",
+                     "ios/fastlane/testflight/en-US/whats_new.txt", "fastlane/screenshots/en-US/1.png",
+                     "fastlane/screenshots/1.jpeg"):
             with self.subTest(path):
                 self.assertEqual(tier([path])[0], "normal")
-        for path in ("fastlane/screenshots/en-US/1.png", "fastlane/README.md"):
+        self.assertEqual(tier(["fastlane/README.md"])[0], "low")
+
+    def test_an_exception_frees_one_pattern_and_only_store_text(self):
+        for path in ("fastlane/testflight/AuthKey.p8", "fastlane/metadata/en-US/.env",
+                     "fastlane/testflight/App.entitlements", "fastlane/testflight/Fastfile",
+                     "fastlane/testflight/REVIEW.md", ".github/actions/fastlane/testflight/action.yml",
+                     ".codex/fastlane/testflight/hooks.json", ".claude/skills/fastlane/README.md",
+                     ".claude/fastlane/screenshots/rules.md", "fastlane/testflight/lanes.rb",
+                     "fastlane/testflight/review_information/demo_password.txt",
+                     "fastlane/metadata/review_information/notes.txt", "fastlane/screenshots/Framefile.json",
+                     "fastlane/screenshots/run.sh", "fastlane/metadata/en-US/x.rb"):
             with self.subTest(path):
-                self.assertEqual(tier([path])[0], "low")
+                self.assertEqual(tier([path])[0], "dan")
 
     def test_a_repos_own_list_still_holds_what_dan_except_frees(self):
         policy = dict(POLICY, repos={REPO: {"dan": ["**"]}})
         found = merge_gate.classify(REPO, "nightly", [], [{"path": "fastlane/README.md", "status": "modified"}],
                                     True, policy)
         self.assertEqual(found[0], "dan")
-
-    def test_globs_ignore_case(self):
-        for path in (".github/workflows/CI.yml", "ios/fastlane/fastfile", "App/App.ENTITLEMENTS", "Review.md"):
-            with self.subTest(path):
-                self.assertEqual(tier([path])[0], "dan")
 
     def test_rename_out_of_the_stop_list_still_counts(self):
         self.assertEqual(tier(renamed=(".github/workflows/ci.yml", "old/ci.yml"))[0], "dan")

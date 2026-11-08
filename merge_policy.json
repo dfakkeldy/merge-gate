@@ -3,9 +3,9 @@
     "Risk tiers for the Merge gate check and for land_pr.py. The tier is set by the change, not by who wrote it.",
     "dan: waits for Dan. The Merge gate check fails until the repository owner adds the approved_label after the latest commit. Once added, label (needs-dan) still counts after someone removes it. low: only prose and images. normal: everything else. The gate passes low and normal; land_pr.py also wants an independent review line for normal.",
     "dan.relief lets three stop-list changes through without Dan, since none can change what runs: reference (a file byte-identical to the same path in the reference repo at ref), comment_only (files with these suffixes where only whole-line comments or blank lines outside block scalars changed) and back_merge (a PR into nightly whose every changed file already matches main or weekly, and that nightly hadn't changed since they last shared history). Remove a key to switch its rule off. A needs-dan label still holds.",
-    "dan.relief.plain_workflow frees a workflow from the stop list when its text, before, after and on the base's tip, holds no secret but GITHUB_TOKEN, no write access, no pull_request_target or workflow_run, no self-hosted runner, and the edit adds no continue-on-error, || true or if: false. It stays normal tier, so a reviewer still reads it. held_names and a repo's own dan patterns stay held. So every other workflow, including one with a new name, waits for Dan.",
-    "dan.except frees fastlane's store text and screenshots from the shared stop list, and low.except keeps the text at normal tier: a release takes it as reviewed. Nothing else under fastlane is freed, so review_information, tests and new files wait for Dan.",
-    "Globs: ** crosses folders, * and ? stay inside one folder, and case doesn't count. A rename is judged by both its old and new path.",
+    "dan.relief.plain_workflow frees a workflow from the stop list when its text, before, after and on the base's tip, holds no secret but GITHUB_TOKEN, no write access, no pull_request_target, workflow_run or workflow_call, no self-hosted runner and no name of a check the gates trust, and the edit adds no way to ignore a failure. It stays normal tier, so a reviewer still reads it. held_names and a repo's own dan patterns stay held. So every other workflow, including one with a new name, waits for Dan.",
+    "dan.except frees paths from one named stop-list pattern. Fastlane's store text and screenshots leave **/fastlane/**, and low.except keeps them at normal tier: a release takes them as reviewed. Anything else under fastlane, including review_information, tests, lanes and new files, waits for Dan, and any other pattern, such as **/*.p8, still holds a file in those folders.",
+    "Globs: ** crosses folders, * and ? stay inside one folder. A rename is judged by both its old and new path.",
     "Per repo: dan adds stop-list paths; low_heads names automation branches whose workflow-opened PRs are low; no_ci_ok lets land_pr.py land a PR when the repo's path-filtered CI doesn't run for it; own_gate leaves stop-list PRs to the repo's own merge job.",
     "Everything in this repository is on its own stop list, so a PR can't loosen the rules that judge it."
   ],
@@ -37,15 +37,23 @@
       ".github/copilot-instructions.md",
       "**/REVIEW.md"
     ],
-    "except": [
-      "**/fastlane/screenshots/**",
-      "**/fastlane/testflight/**",
-      "**/fastlane/README.md",
-      "**/fastlane/metadata/*.txt",
-      "**/fastlane/metadata/??/**",
-      "**/fastlane/metadata/??-??/**",
-      "**/fastlane/metadata/??-????/**"
-    ],
+    "except": {
+      "**/fastlane/**": [
+        "**/fastlane/README.md",
+        "**/fastlane/screenshots/**/*.png",
+        "**/fastlane/screenshots/**/*.jpg",
+        "**/fastlane/screenshots/**/*.jpeg",
+        "**/fastlane/metadata/*.txt",
+        "**/fastlane/metadata/default/*.txt",
+        "**/fastlane/metadata/??/*.txt",
+        "**/fastlane/metadata/??-??/*.txt",
+        "**/fastlane/metadata/??-????/*.txt",
+        "**/fastlane/testflight/*.txt",
+        "**/fastlane/testflight/??/*.txt",
+        "**/fastlane/testflight/??-??/*.txt",
+        "**/fastlane/testflight/??-????/*.txt"
+      ]
+    },
     "promotion_bases": [
       "weekly",
       "main"
@@ -100,7 +108,8 @@
       "**/requirements*.txt",
       "**/CMakeLists.txt",
       "**/fastlane/metadata/**",
-      "**/fastlane/testflight/**"
+      "**/fastlane/testflight/**",
+      "**/fastlane/screenshots/**"
     ]
   },
   "repos": {

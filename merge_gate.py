@@ -90,7 +90,7 @@ def glob_re(pattern):
             out, i = out + "[^/]", i + 1
         else:
             out, i = out + re.escape(pattern[i]), i + 1
-    return re.compile(out + r"\Z", re.DOTALL | re.IGNORECASE)
+    return re.compile(out + r"\Z", re.DOTALL)
 
 
 def matches(path, patterns):
@@ -102,10 +102,12 @@ def repo_extra(repo, policy):
 
 
 def stop_hit(path, repo, policy):
-    """The stop-list pattern that holds this path, or None. dan.except frees store text from
-    the shared list. A repo's own patterns still hold it."""
+    """The stop-list pattern that holds this path, or None. dan.except frees a path from one
+    named pattern only, so a key file among the store text is still held by its own pattern.
+    A repo's own patterns aren't touched."""
     dan = policy["dan"]
-    hit = None if matches(path, dan.get("except", [])) else matches(path, dan["paths"])
+    free = dan.get("except", {})
+    hit = next((p for p in dan["paths"] if glob_re(p).match(path) and not matches(path, free.get(p, ()))), None)
     return hit or matches(path, repo_extra(repo, policy).get("dan", []))
 
 
@@ -144,7 +146,7 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="",
     if paths and all(p in exempt or (matches(p, low["paths"]) and not matches(p, low["except"])) for p in paths):
         return "low", ["only prose and images" if not exempt else
                        "only prose and images, and stop-list files that can't change what runs"]
-    if head and author in BOT_AUTHORS and matches(head, extra.get("low_heads", [])):
+    if head and author in BOT_AUTHORS and matches(head, extra.get("low_heads", [])) and not plain:
         return "low", [f"opened by the repo's automation ({head})"]
     return "normal", ["code or config outside the stop list"]
 
@@ -504,12 +506,18 @@ _POWER = (
     ("uses a secret", re.compile(r"""\bsecrets\.[a-z_]|\bsecrets\[|\$\{\{(?s:(?:(?!\}\}).)*?)\bsecrets\b"""
                                  r"""|(?:^|[{,])\s*(?:-\s+)?["']?secrets["']?\s*:""", re.I | re.M)),
     ("asks for write access", re.compile(r"(?<![-.\w])write(?:-all)?\b")),
-    ("runs with the base branch's rights", re.compile(r"\b(?:pull_request_target|workflow_run)\b", re.I)),
+    # A called workflow gets its caller's token, so its text alone can't show what it may do.
+    ("can run with more rights than a PR's own run", re.compile(
+        r"\b(?:pull_request_target|workflow_run|workflow_call)\b", re.I)),
+    # Branch protection and land_pr.py trust these check names from any Actions job.
+    ("carries the name of a check the gates trust", re.compile(r"\b(?:merge gate|claude review)\b", re.I)),
     ("runs on Dan's own machine", re.compile(r"\bself-hosted\b", re.I)),
     ("hides text in a YAML escape", re.compile(r"\\[xuUNLP_]")),
 )
 _OWN_TOKEN = re.compile(r"\bsecrets\.GITHUB_TOKEN\b", re.I)
-_WEAKENS = ("continue-on-error", "|| true", "if: false")  # counted, so an edit may keep an old one
+# Ways to ignore a failure or switch a step off. Counted, so an edit may keep an old one.
+_WEAKENS = re.compile(r"""continue-on-error|\|\|\s*(?:true\b|:|exit\s+0\b)|\bset\s+\+e\b"""
+                      r"""|\bif:\s*(?:\$\{\{\s*)?['"]?false\b""", re.I)
 
 
 def workflow_power(text):
@@ -529,7 +537,7 @@ def plain_workflows(repo, base, head_sha, files, exempt, policy, get):
     own = repo_extra(repo, policy).get("dan", [])
     todo = [f["path"] for f in files if f["status"] in ("modified", "added") and not f.get("previous")
             and f["path"] not in exempt and matches(f["path"], rule.get("paths", []))
-            and not matches(f["path"], rule.get("held_names", [])) and not matches(f["path"], own)]
+            and not matches(f["path"].lower(), rule.get("held_names", [])) and not matches(f["path"], own)]
     plain, notes = set(), []
     if not todo or len(files) >= MAX_FILES:
         return plain, notes
@@ -548,9 +556,9 @@ def plain_workflows(repo, base, head_sha, files, exempt, policy, get):
             if after is None or before is None or now is None:
                 continue
             power = workflow_power(after) or workflow_power(before) or workflow_power(now)
-            weak = next((m for m in _WEAKENS if after.count(m) > before.count(m)), None)
+            weak = len(_WEAKENS.findall(after)) > len(_WEAKENS.findall(before))
             if power or weak:
-                notes.append(f"{path} {power or 'adds ' + weak}, so Dan decides")
+                notes.append(f"{path} {power or 'adds a way to ignore a failure'}, so Dan decides")
                 continue
             plain.add(path)
             notes.append(f"{path} has no secret, write access or privileged trigger, so a reviewer clears it")
@@ -573,7 +581,7 @@ def judge_pr(repo, pr, policy, get, has_nightly, commit_seen):
         plain, more = plain_workflows(repo, pr["base"]["ref"], pr["head"]["sha"], files, exempt, policy, get)
         if exempt or back or plain:
             tier, reasons = classify(*args, exempt=exempt, back_merge=back, plain=plain)
-        reasons = reasons + notes + more
+        reasons = reasons + notes + ([] if back else more)
     if tier != "dan":
         return True, tier, reasons
     if policy["dan"]["label"] not in [label["name"] for label in pr["labels"]] and policy["dan"]["label"] in labels:

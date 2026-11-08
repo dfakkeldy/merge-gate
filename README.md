@@ -6,7 +6,7 @@ AI agents open and land most pull requests in Dan's repositories. A short stop l
 still waits for Dan: workflows with power (a secret, write access, a privileged trigger),
 release and signing config, secrets, agent permissions, promotions past `nightly`, and
 deleting more than 25 files. A workflow with none of that power and fastlane's store text
-go to an independent reviewer instead.
+and screenshots go to an independent reviewer instead.
 GitHub's native auto-merge (`gh pr merge --auto`, apps that arm it, the merge
 button) waits only for required checks. So the stop list has to be a required check.
 
@@ -31,14 +31,19 @@ of both, so they agree on every repository that uses only this policy.
 
 ## Stop-list changes that pass without Dan
 
-Some stop-list changes can't alter what runs. `dan.relief` in the policy lets three
-kinds through; remove a key to switch its rule off. `needs-dan` still holds all of them.
+`dan.relief` in the policy lets four kinds of stop-list change through; remove a key to
+switch its rule off. The first three can't alter what runs. The fourth stays normal tier, so
+a reviewer still reads it. `needs-dan` still holds all of them.
 
 | Rule | Passes | Still waits for Dan |
 |---|---|---|
 | `reference` | a file byte-identical to the same path in `dfakkeldy/merge-gate` at `main` (the caller workflow every repo copies) | any other edit to that file; a rename or removal; a change to the reference itself (once, here) |
 | `comment_only` | a `.yml`/`.yaml` file where only whole-line comments or blank lines changed, outside block scalars | a `#` line inside a block scalar (`prompt: \|`, `run: \|`), which is content; a trailing comment on a value line; anything the scanner can't read with confidence (a multi-line quoted or flow value, a quoted key opening a block, a tag before a block indicator, a tab in indentation) |
 | `back_merge` | in a PR into `nightly`, a stop-list file that is exactly `main`'s (or `weekly`'s) copy, where `nightly` hadn't changed it since the two last shared history. If every changed file passes, the whole PR is low tier | a file that mixes both sides after a conflict, or that would replace `nightly`'s own newer work with `main`'s copy |
+| `plain_workflow` | a modified or new workflow whose text before, after and on the base's tip has no secret but `GITHUB_TOKEN`, no write access, no `pull_request_target`, `workflow_run` or `workflow_call`, no self-hosted runner and no name of a check the gates trust, where the edit adds no way to ignore a failure | anything else; a rename or removal; a name in `held_names`; a path on the repo's own list |
+
+`dan.except` frees named paths from one stop-list pattern. It frees fastlane's store text and
+screenshots from `**/fastlane/**`; any other pattern still holds a file in those folders.
 
 What these rules can't see. `comment_only` reads YAML with a small scanner, not a
 parser, so it refuses anything unusual rather than guess: any whitespace but a plain
@@ -102,8 +107,10 @@ out to get round it.
 - `plain_workflow` reads a workflow's text, not what it does. It can't see an edit that
   removes a test step or skips a test. Branch protection fails a required check that
   disappears; anything subtler is the reviewer's to catch. It also relies on each repo's
-  default workflow token being read-only. A repo set to read and write gives every
-  workflow write access without asking.
+  default workflow token being read-only, which the gate can't read: a repo set to read and
+  write gives every workflow write access without asking. It matches only the runner label
+  `self-hosted`, so a custom label passes. A plain workflow can also write a cache that a
+  release job restores, if the two share a key.
 - Where branch protection doesn't bind admins, an admin's direct merge (the web
   "bypass" box, `gh pr merge --admin`, a raw API merge) still skips required checks.
   The gate stops the auto-merge paths, not a deliberate override.
