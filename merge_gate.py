@@ -294,10 +294,11 @@ def dan_approved(repo, labels, events, policy, since):
     (the repo owner) after the PR took its current shape (since, from shaped_since), so
     the approval covers the commit and base he saw. A label added by an agent's GitHub
     App (name[bot]) doesn't count. One added with Dan's own token can't be told apart
-    from his; the agents' rules forbid that and their Bash guard flags it. The one
-    sanctioned exception: Dan's 👍 on the PR steward's daily digest approves the PRs it
-    lists, and the steward then adds this label with his token, to each PR whose head is
-    still the commit the digest listed."""
+    from his; the agents' rules forbid that and their Bash guard flags it. Two sanctioned
+    exceptions: Dan's 👍 on the PR steward's daily digest approves the PRs it lists, and
+    the steward then adds this label with his token, to each PR whose head is still the
+    commit the digest listed; and Dan's own yes in chat, naming the PRs, lets the agent
+    he told add it."""
     label, owner = policy["dan"]["approved_label"], repo.split("/")[0]
     if label not in labels:
         return False, ""

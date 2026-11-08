@@ -109,10 +109,11 @@ out to get round it.
   The gate stops the auto-merge paths, not a deliberate override.
 - An agent that uses the owner's own token can add `dan-approved` as the owner. The
   gate can't tell that apart from Dan. The agents' rules forbid it, and their Bash
-  guard flags the usual `gh` forms (a warning, unless the guard is set to block). The
-  one sanctioned exception: Dan's 👍 on the PR steward's daily digest approves the PRs
-  it lists, and the steward adds the label with his token to each PR whose head is
-  still the commit the digest listed.
+  guard flags the usual `gh` forms (a warning, unless the guard is set to block). Two
+  sanctioned exceptions: Dan's 👍 on the PR steward's daily digest approves the PRs it
+  lists, and the steward adds the label with his token to each PR whose head is still
+  the commit the digest listed; and Dan's own yes in chat, naming the PRs, lets the agent
+  he told add it.
 - A commit pushed to some other branch before Dan's approval, then made the PR's head,
   still counts as seen before the approval.
 - Creating a `nightly` branch later doesn't re-judge open PRs into `main`; nudge them.
