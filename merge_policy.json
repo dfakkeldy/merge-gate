@@ -3,41 +3,23 @@
     "Risk tiers for the Merge gate check and for land_pr.py. The tier is set by the change, not by who wrote it.",
     "dan: waits for Dan. The Merge gate check fails until the repository owner adds the approved_label after the latest commit. Once added, label (needs-dan) still counts after someone removes it. low: only prose and images. normal: everything else. The gate passes low and normal; land_pr.py also wants an independent review line for normal.",
     "dan.relief lets three stop-list changes through without Dan, since none can change what runs: reference (a file byte-identical to the same path in the reference repo at ref), comment_only (files with these suffixes where only whole-line comments or blank lines outside block scalars changed) and back_merge (a PR into nightly whose every changed file already matches main or weekly, and that nightly hadn't changed since they last shared history). Remove a key to switch its rule off. A needs-dan label still holds.",
-    "The stop list holds what Dan can judge in a sentence and what no reviewer should clear alone: workflows that release, deploy, hold an agent's prompt or hold an API key, the gate itself, signing and release lanes, secrets, agent permissions, and promotions. Ordinary CI workflows and fastlane's store text and screenshots aren't on it: an independent reviewer (land_pr.py's Reviewed-by line) and CI clear those, and a listing reaches the App Store only through a manual run or a release, and those stay on the list.",
-    "Globs: ** crosses folders, * and ? stay inside one folder. A rename is judged by both its old and new path.",
+    "dan.relief.plain_workflow frees a workflow from the stop list when its text, before, after and on the base's tip, holds no secret but GITHUB_TOKEN, no write access, no pull_request_target or workflow_run, no self-hosted runner, and the edit adds no continue-on-error, || true or if: false. It stays normal tier, so a reviewer still reads it. held_names and a repo's own dan patterns stay held. So every other workflow, including one with a new name, waits for Dan.",
+    "dan.except frees fastlane's store text and screenshots from the shared stop list, and low.except keeps the text at normal tier: a release takes it as reviewed. Nothing else under fastlane is freed, so review_information, tests and new files wait for Dan.",
+    "Globs: ** crosses folders, * and ? stay inside one folder, and case doesn't count. A rename is judged by both its old and new path.",
     "Per repo: dan adds stop-list paths; low_heads names automation branches whose workflow-opened PRs are low; no_ci_ok lets land_pr.py land a PR when the repo's path-filtered CI doesn't run for it; own_gate leaves stop-list PRs to the repo's own merge job.",
     "Everything in this repository is on its own stop list, so a PR can't loosen the rules that judge it."
   ],
   "dan": {
     "paths": [
-      ".github/workflows/*release*",
-      ".github/workflows/*deploy*",
-      ".github/workflows/*promot*",
-      ".github/workflows/*publish*",
-      ".github/workflows/*store*",
-      ".github/workflows/*testflight*",
-      ".github/workflows/*pages*",
-      ".github/workflows/*-site.*",
-      ".github/workflows/*claude*",
-      ".github/workflows/*codex*",
-      ".github/workflows/*agent*",
-      ".github/workflows/*merge-gate*",
-      ".github/workflows/*auto-merge*",
-      ".github/workflows/*devlog*",
-      ".github/workflows/*narration*",
+      ".github/workflows/**",
       ".github/actions/**",
       ".github/scripts/**",
       ".github/CODEOWNERS",
       ".github/release-inputs.json",
+      "**/fastlane/**",
       "**/Fastfile",
       "**/Matchfile",
       "**/Appfile",
-      "**/Deliverfile",
-      "**/Gymfile",
-      "**/Pluginfile",
-      "**/fastlane/lib/**",
-      "**/fastlane/actions/**",
-      "**/fastlane/*.json",
       "**/*.entitlements",
       "**/ExportOptions*.plist",
       "**/.env",
@@ -55,14 +37,46 @@
       ".github/copilot-instructions.md",
       "**/REVIEW.md"
     ],
-    "promotion_bases": ["weekly", "main"],
+    "except": [
+      "**/fastlane/screenshots/**",
+      "**/fastlane/testflight/**",
+      "**/fastlane/README.md",
+      "**/fastlane/metadata/*.txt",
+      "**/fastlane/metadata/??/**",
+      "**/fastlane/metadata/??-??/**",
+      "**/fastlane/metadata/??-????/**"
+    ],
+    "promotion_bases": [
+      "weekly",
+      "main"
+    ],
     "max_removed_files": 25,
     "label": "needs-dan",
     "approved_label": "dan-approved",
     "relief": {
-      "reference": {"repo": "dfakkeldy/merge-gate", "ref": "main", "paths": [".github/workflows/merge-gate.yml"]},
-      "comment_only": [".yml", ".yaml"],
-      "back_merge": true
+      "reference": {
+        "repo": "dfakkeldy/merge-gate",
+        "ref": "main",
+        "paths": [
+          ".github/workflows/merge-gate.yml"
+        ]
+      },
+      "comment_only": [
+        ".yml",
+        ".yaml"
+      ],
+      "back_merge": true,
+      "plain_workflow": {
+        "paths": [
+          ".github/workflows/*.yml",
+          ".github/workflows/*.yaml"
+        ],
+        "held_names": [
+          ".github/workflows/*secret*",
+          ".github/workflows/*security*",
+          ".github/workflows/*codeql*"
+        ]
+      }
     }
   },
   "low": {
@@ -84,12 +98,16 @@
       "**/SKILL.md",
       "**/*instructions*.md",
       "**/requirements*.txt",
-      "**/CMakeLists.txt"
+      "**/CMakeLists.txt",
+      "**/fastlane/metadata/**",
+      "**/fastlane/testflight/**"
     ]
   },
   "repos": {
     "dfakkeldy/merge-gate": {
-      "dan": ["**"],
+      "dan": [
+        "**"
+      ],
       "note": "This repository is the gate. Every repo runs its main branch, so any change here (even a new file beside merge_gate.py) changes the rule everywhere."
     }
   }

@@ -31,41 +31,46 @@ class Globs(unittest.TestCase):
     def test_double_star_crosses_folders_single_star_does_not(self):
         self.assertTrue(merge_gate.glob_re("**/*.md").match("README.md"))
         self.assertTrue(merge_gate.glob_re("**/*.md").match("docs/a/b.md"))
-        self.assertTrue(merge_gate.glob_re(".github/workflows/**").match(".github/workflows/release-trains.yml"))
+        self.assertTrue(merge_gate.glob_re(".github/workflows/**").match(".github/workflows/ci.yml"))
         self.assertFalse(merge_gate.glob_re("docs/*.md").match("docs/a/b.md"))
         self.assertFalse(merge_gate.glob_re("**/*.md").match("notes.md.bak"))
 
 
 class Tiers(unittest.TestCase):
     def test_stop_list(self):
-        for path in (".github/workflows/release-trains.yml", "ios/fastlane/Fastfile", "App/App.entitlements",
+        for path in (".github/workflows/ci.yml", "ios/fastlane/Fastfile", "App/App.entitlements",
                      ".env.production", "keys/AuthKey.p8", ".claude/settings.json",
                      ".claude/commands/ship.md", ".codex/hooks.json", ".github/copilot-instructions.md",
-                     "fastlane/Fastfile", "fastlane/lib/lanes.rb", "fastlane/api_key.json", ".claude", "app/.cursor", "REVIEW.md",
+                     "fastlane/Snapfile", "fastlane/test/release_lane_test.rb", "fastlane/lib/x.rb",
+                     "fastlane/metadata/review_information/demo_user.txt", "fastlane/plugins/p.rb",
+                     ".claude", "app/.cursor", "REVIEW.md",
                      "web/REVIEW.md"):
             with self.subTest(path):
                 self.assertEqual(tier([path, "src/app.ts"])[0], "dan")
 
-    def test_workflows_that_release_deploy_or_hold_a_prompt_or_key_stay_on_the_list(self):
-        for name in ("release", "release-trains", "app-store-release", "store-listing", "store-screenshots", "deploy",
-                     "promote-ns-marks-web", "docs-site", "go-claude", "claude-review", "merge-gate", "auto-merge",
-                     "devlog-update", "episode-narration"):
-            with self.subTest(name):
-                self.assertEqual(tier([f".github/workflows/{name}.yml"])[0], "dan")
-
-    def test_ordinary_ci_workflows_are_normal_tier_and_need_a_reviewer_not_dan(self):
-        for name in ("ci", "tests", "check", "site-checks", "repo-ci", "app-build", "tax-sale-watch"):
-            with self.subTest(name):
-                self.assertEqual(tier([f".github/workflows/{name}.yml"])[0], "normal")
-
-    def test_fastlanes_store_text_and_screenshots_are_low_tier(self):
-        for path in ("fastlane/screenshots/en-US/1.png", "fastlane/testflight/en-US/whats_new.txt",
-                     "fastlane/metadata/en-US/description.txt", "fastlane/README.md"):
+    def test_store_text_goes_to_a_reviewer_and_screenshots_need_none(self):
+        for path in ("fastlane/metadata/en-US/description.txt", "fastlane/metadata/fr-CA/name.txt",
+                     "fastlane/metadata/zh-Hans/keywords.txt", "fastlane/metadata/copyright.txt",
+                     "fastlane/testflight/what_to_test.txt", "ios/fastlane/testflight/en-US/whats_new.txt"):
+            with self.subTest(path):
+                self.assertEqual(tier([path])[0], "normal")
+        for path in ("fastlane/screenshots/en-US/1.png", "fastlane/README.md"):
             with self.subTest(path):
                 self.assertEqual(tier([path])[0], "low")
 
+    def test_a_repos_own_list_still_holds_what_dan_except_frees(self):
+        policy = dict(POLICY, repos={REPO: {"dan": ["**"]}})
+        found = merge_gate.classify(REPO, "nightly", [], [{"path": "fastlane/README.md", "status": "modified"}],
+                                    True, policy)
+        self.assertEqual(found[0], "dan")
+
+    def test_globs_ignore_case(self):
+        for path in (".github/workflows/CI.yml", "ios/fastlane/fastfile", "App/App.ENTITLEMENTS", "Review.md"):
+            with self.subTest(path):
+                self.assertEqual(tier([path])[0], "dan")
+
     def test_rename_out_of_the_stop_list_still_counts(self):
-        self.assertEqual(tier(renamed=(".github/workflows/release-trains.yml", "old/ci.yml"))[0], "dan")
+        self.assertEqual(tier(renamed=(".github/workflows/ci.yml", "old/ci.yml"))[0], "dan")
 
     def test_promotion_past_nightly_waits_but_main_without_a_ladder_does_not(self):
         self.assertEqual(tier(["src/a.py"], base="main", nightly=True)[0], "dan")
@@ -206,7 +211,8 @@ class FakeAPI:
             return [dict(p) for p in self.prs]
         if "/pulls/" in path and "/files" in path:
             number = int(path.split("/pulls/")[1].split("/")[0])
-            return [{"filename": f, "status": "modified"} for f in self.files.get(number, ["src/app.py"])]
+            return [f if isinstance(f, dict) else {"filename": f, "status": "modified"}
+                    for f in self.files.get(number, ["src/app.py"])]
         if path.endswith("/pulls/7"):
             return dict(self.prs[0])
         if path.endswith("/branches/nightly"):
@@ -227,7 +233,7 @@ def run_main(fake, argv=("--repo", REPO, "--pr", "7")):
     return code, out.getvalue()
 
 
-WORKFLOW = {7: [".github/workflows/release-trains.yml"]}
+WORKFLOW = {7: [".github/workflows/ci.yml"]}
 
 
 class Gate(unittest.TestCase):
@@ -316,7 +322,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(merge_gate.author_of(None), "")
 
     def test_a_file_name_cannot_start_a_line_in_the_log(self):
-        code, out = run_main(FakeAPI(files={7: [".github/actions/x\n::warning::forged.yml"]}))
+        code, out = run_main(FakeAPI(files={7: [".github/workflows/x\n::warning::forged.yml"]}))
         self.assertEqual(code, 1)
         self.assertFalse([line for line in out.splitlines() if line.startswith("::warning")])
 
