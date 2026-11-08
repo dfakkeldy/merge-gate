@@ -191,9 +191,20 @@ def _closed(value):
                 return True
             i += 1
         return False
-    if v.startswith(("[", "{")):
-        return v.count("[") + v.count("{") == v.count("]") + v.count("}")
+    if v.startswith(("[", "{")):  # brackets inside quotes would fool a count, so quotes make it give up
+        return not any(c in v for c in "'\"") and v.count("[") + v.count("{") == v.count("]") + v.count("}")
     return True
+
+
+def _unprintable(text):
+    """True when the text holds a character YAML can't print, which makes a parser refuse the
+    whole file (so a 'comment' holding one would switch the workflow off)."""
+    for i, c in enumerate(text):
+        o = ord(c)
+        if (o < 0x20 and c not in "\t\n\r") or 0x7F <= o <= 0x9F or 0xD800 <= o <= 0xDFFF \
+                or c in "\ufffe\uffff" or (c == "\ufeff" and i):
+            return True
+    return False
 
 
 def yaml_meaning(text):
@@ -203,9 +214,10 @@ def yaml_meaning(text):
     there they are content, like a heading in an agent's prompt. It gives up on anything
     else it can't read with confidence: whitespace other than a plain space anywhere (a
     no-break space before `#` keeps a plain scalar going), a line break YAML doesn't use, a
-    value that might span lines (an open quote or flow collection, an anchor or tag in
-    front of one, a quoted key), and a block indicator it doesn't recognise."""
-    if any(c in text for c in _ODD_BREAKS):
+    character YAML can't print, a value that might span lines (an open quote or flow
+    collection, a flow collection holding quotes, an anchor or tag in front of one, a
+    quoted key), and a block indicator it doesn't recognise."""
+    if any(c in text for c in _ODD_BREAKS) or _unprintable(text):
         return None
     pieces = text.split("\n")
     if pieces and pieces[-1] == "":  # the empty piece after a final newline

