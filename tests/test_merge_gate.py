@@ -48,12 +48,13 @@ class Tiers(unittest.TestCase):
             with self.subTest(path):
                 self.assertEqual(tier([path, "src/app.ts"])[0], "dan")
 
-    def test_store_text_goes_to_a_reviewer_and_screenshots_need_none(self):
+    def test_store_text_and_screenshots_go_to_a_reviewer(self):
         for path in ("fastlane/metadata/en-US/description.txt", "fastlane/metadata/fr-CA/name.txt",
                      "fastlane/metadata/zh-Hans/keywords.txt", "fastlane/metadata/copyright.txt",
                      "fastlane/metadata/default/name.txt", "fastlane/testflight/what_to_test.txt",
                      "ios/fastlane/testflight/en-US/whats_new.txt", "fastlane/screenshots/en-US/1.png",
-                     "fastlane/screenshots/1.jpeg"):
+                     "fastlane/screenshots/1.jpeg", "fastlane/screenshots/en-US/README.md",
+                     "fastlane/metadata/es-419/name.txt"):
             with self.subTest(path):
                 self.assertEqual(tier([path])[0], "normal")
         self.assertEqual(tier(["fastlane/README.md"])[0], "low")

@@ -110,7 +110,9 @@ out to get round it.
   default workflow token being read-only, which the gate can't read: a repo set to read and
   write gives every workflow write access without asking. It matches only the runner label
   `self-hosted`, so a custom label passes. A plain workflow can also write a cache that a
-  release job restores, if the two share a key.
+  release job restores if the two share a key, or join a release's concurrency group and
+  cancel it. A backslash-newline inside a quoted value can hide a word from the scan. All
+  of these take a deliberate edit, and a reviewer still reads the workflow.
 - Where branch protection doesn't bind admins, an admin's direct merge (the web
   "bypass" box, `gh pr merge --admin`, a raw API merge) still skips required checks.
   The gate stops the auto-merge paths, not a deliberate override.
