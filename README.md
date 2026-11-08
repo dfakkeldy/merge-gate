@@ -3,8 +3,10 @@
 A required GitHub check that holds risky pull requests for Dan.
 
 AI agents open and land most pull requests in Dan's repositories. A short stop list
-still waits for Dan: CI and workflow files, release and signing config, secrets,
-agent permissions, promotions past `nightly`, and deleting more than 25 files.
+still waits for Dan: workflows that release, deploy, hold an agent's prompt or hold an
+API key, the gate itself, signing and release lanes, secrets, agent permissions, promotions past
+`nightly`, and deleting more than 25 files. Ordinary CI workflows and fastlane's store
+text and screenshots aren't on it: an independent reviewer and CI clear those.
 GitHub's native auto-merge (`gh pr merge --auto`, apps that arm it, the merge
 button) waits only for required checks. So the stop list has to be a required check.
 
@@ -97,6 +99,11 @@ checking means no relief, never a pass.
 The gate guards against mistakes, not against someone with write access who sets
 out to get round it.
 
+- Workflows are held by name. On 8 Nov 2026 every live workflow in the gated repos that
+  used a secret other than `GITHUB_TOKEN` was on the list. A new workflow with an ordinary
+  name that deploys or holds a secret isn't held; the reviewer has to catch it. So does an
+  edit to `ci.yml` that adds a write permission or weakens a required check (a skipped
+  test, `continue-on-error`).
 - Where branch protection doesn't bind admins, an admin's direct merge (the web
   "bypass" box, `gh pr merge --admin`, a raw API merge) still skips required checks.
   The gate stops the auto-merge paths, not a deliberate override.

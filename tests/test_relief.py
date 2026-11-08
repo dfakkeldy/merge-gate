@@ -10,7 +10,7 @@ import merge_gate  # noqa: E402
 from test_merge_gate import FakeAPI, POLICY, REPO, SHA, labelled, pr, run_main  # noqa: E402
 
 CALLER = ".github/workflows/merge-gate.yml"
-CI = ".github/workflows/ci.yml"
+CI = ".github/workflows/release-trains.yml"
 
 # The shape of go-claude.yml: a prompt for an agent in a block scalar.
 AGENT = """\
@@ -221,7 +221,7 @@ class Reference(unittest.TestCase):
 
     def test_removing_or_renaming_the_caller_waits(self):
         for f in ({"path": CALLER, "previous": None, "status": "removed"},
-                  {"path": CALLER, "previous": ".github/workflows/old.yml", "status": "renamed"}):
+                  {"path": CALLER, "previous": ".github/workflows/old-release.yml", "status": "renamed"}):
             exempt, back, _ = merge_gate.relief(REPO, "main", SHA, [f], False, POLICY, reference_api(GATE))
             self.assertEqual(exempt, set())
 
@@ -299,8 +299,8 @@ class CommentOnly(unittest.TestCase):
         self.assertNotIn("could not judge", out)
 
 
-MAIN = {"App/a.swift": "v2", ".github/workflows/ci.yml": "ci v2", "README.md": "r"}
-SHARED = {"App/a.swift": "v1", ".github/workflows/ci.yml": "ci v1", "README.md": "r"}
+MAIN = {"App/a.swift": "v2", ".github/workflows/release-trains.yml": "ci v2", "README.md": "r"}
+SHARED = {"App/a.swift": "v1", ".github/workflows/release-trains.yml": "ci v1", "README.md": "r"}
 
 
 def back_merge_api(head, nightly=None, labels=(), files=(CI, "App/a.swift"), base="nightly", main=MAIN, shared=None):
@@ -340,7 +340,7 @@ class BackMerge(unittest.TestCase):
         self.assertIn("tier low", out)
 
     def test_a_mixed_stop_list_file_beside_carried_ones_still_waits(self):
-        lane_docs = "fastlane/README.md"
+        lane_docs = "fastlane/lib/lanes.rb"
         nightly = dict(SHARED, **{lane_docs: "lanes, nightly"})
         main = dict(MAIN, **{lane_docs: "lanes, main"})
         head = dict(main, **{lane_docs: "lanes, both"})
@@ -348,10 +348,10 @@ class BackMerge(unittest.TestCase):
                              shared=dict(SHARED, **{lane_docs: "lanes"}))
         code, out = run_main(api)
         self.assertEqual(code, 1)
-        self.assertIn("fastlane/README.md", out)
+        self.assertIn("fastlane/lib/lanes.rb", out)
 
     def test_a_removed_file_must_be_gone_from_main_too(self):
-        old_flow = ".github/workflows/old.yml"
+        old_flow = ".github/workflows/old-release.yml"
         shared = dict(SHARED, **{old_flow: "still on main"})
         api = back_merge_api(head=dict(MAIN), main=dict(MAIN, **{old_flow: "still on main"}), files=(CI, old_flow),
                              nightly=dict(shared), shared=dict(shared))
