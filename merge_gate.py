@@ -15,9 +15,25 @@ and passes only if all of them pass. Any error fails the check.
 
 The tiers come from merge_policy.json. classify() is shared with land_pr.py, the tool
 that lands agents' PRs, which keeps a byte-identical copy of this file and the policy.
+
+Three kinds of stop-list change can't alter what runs, so relief() lets them through
+without Dan (each one switched on by the policy's dan.relief):
+  reference     a file that is an exact copy of the same file in a reference repo (the
+                gate's own caller workflow, copied into every repo). Changing the
+                reference itself still waits for Dan, once.
+  comment_only  a YAML file where only whole-line comments or blank lines changed. Lines
+                inside a block scalar (`prompt: |`, `run: |`) are content, `#` or not, and
+                anything the scanner can't read with confidence counts as a real change.
+  back_merge    in a PR into nightly, a stop-list file that is exactly main's (or weekly's)
+                copy, where nightly hadn't changed the file since it last shared history
+                with that branch: it only brings nightly what main already has. When every
+                changed file passes, the whole PR is low tier. A conflict resolution that
+                mixes both sides, or that would drop nightly's own work, fails and waits.
+A needs-dan label still holds every one of them.
+
 Python 3.9 or newer, standard library only.
 """
-import argparse, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, base64, binascii, json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
 
 POLICY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "merge_policy.json")
 BOT_AUTHORS = {"app/github-actions", "github-actions"}
@@ -77,15 +93,27 @@ def matches(path, patterns):
     return next((p for p in patterns if glob_re(p).match(path)), None)
 
 
-def classify(repo, base, labels, files, has_nightly, policy, head="", author=""):
+def repo_extra(repo, policy):
+    return {k.lower(): v for k, v in policy.get("repos", {}).items()}.get(repo.lower(), {})
+
+
+def stop_paths(repo, policy):
+    return policy["dan"]["paths"] + repo_extra(repo, policy).get("dan", [])
+
+
+def classify(repo, base, labels, files, has_nightly, policy, head="", author="", exempt=(), back_merge=None):
     """(tier, reasons). files: [{"path", "previous", "status"}]; previous is set on renames.
-    A repo can name automation branches whose PRs, opened by a workflow, are low tier."""
+    A repo can name automation branches whose PRs, opened by a workflow, are low tier.
+    exempt and back_merge come from relief(): stop-list paths whose change can't alter what
+    runs, and the ladder branch a pure back-merge into nightly already matches."""
     dan, low = policy["dan"], policy["low"]
-    extra = {k.lower(): v for k, v in policy.get("repos", {}).items()}.get(repo.lower(), {})
-    dan_paths = dan["paths"] + extra.get("dan", [])
+    extra = repo_extra(repo, policy)
+    dan_paths = stop_paths(repo, policy)
     reasons = []
     if dan["label"] in labels:
         reasons.append(f"labelled {dan['label']}")
+    if back_merge and not reasons and has_nightly and base == "nightly":
+        return "low", [f"a back-merge: every file it changes already matches {back_merge}"]
     if has_nightly and base in dan["promotion_bases"]:
         reasons.append(f"targets {base}, a promotion past nightly")
     if len(files) >= MAX_FILES:
@@ -93,7 +121,7 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="")
     paths = sorted({p for f in files for p in (f["path"], f.get("previous")) if p})
     hits = {}
     for path in paths:
-        hit = matches(path, dan_paths)
+        hit = None if path in exempt else matches(path, dan_paths)
         if hit:
             hits.setdefault(hit, []).append(path)
     for pattern, hit_paths in hits.items():
@@ -104,11 +132,98 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="")
         reasons.append(f"deletes {removed} files (more than {dan['max_removed_files']})")
     if reasons:
         return "dan", reasons
-    if paths and all(matches(p, low["paths"]) and not matches(p, low["except"]) for p in paths):
-        return "low", ["only prose and images"]
+    if paths and all(p in exempt or (matches(p, low["paths"]) and not matches(p, low["except"])) for p in paths):
+        return "low", ["only prose and images" if not exempt else
+                       "only prose and images, and stop-list files that can't change what runs"]
     if head and author in BOT_AUTHORS and matches(head, extra.get("low_heads", [])):
         return "low", [f"opened by the repo's automation ({head})"]
     return "normal", ["code or config outside the stop list"]
+
+
+# --- comment-only YAML ------------------------------------------------------------
+
+_INDICATOR = r"[|>](?:[1-9][+-]?|[+-][1-9]?)?\s*(?:#.*)?$"
+# `key: |`, `- >-`, `- key: |2`: a plain key (no quotes, no flow) then a block indicator.
+_BLOCK_OPENER = re.compile(r"^(?:-\s+)*(?:[^\s#'\"{}\[\],&*!|>%@`-][^#'\"{}\[\]]*?:\s+)?" + _INDICATOR)
+_ENDS_LIKE_BLOCK = re.compile(_INDICATOR)
+_PLAIN_KEY = re.compile(r"[^\s#'\"{}\[\],&*!|>%@`-][^#'\"{}\[\]]*?:(?:\s+|$)")
+
+
+def _value(stripped):
+    """A line's value: what follows its list dashes and its plain key, if any."""
+    s = stripped
+    while s.startswith("- "):
+        s = s[2:].lstrip()
+    m = _PLAIN_KEY.match(s)
+    return s[m.end():] if m else s
+
+
+def _closed(value):
+    """False when a quoted or flow value doesn't end on its own line (so later lines,
+    `#` ones included, could be inside it)."""
+    v = value.strip()
+    if v.startswith('"'):
+        i = 1
+        while i < len(v):
+            if v[i] == "\\":
+                i += 2
+                continue
+            if v[i] == '"':
+                return True
+            i += 1
+        return False
+    if v.startswith("'"):
+        i = 1
+        while i < len(v):
+            if v[i] == "'":
+                if v[i + 1:i + 2] == "'":
+                    i += 2
+                    continue
+                return True
+            i += 1
+        return False
+    if v.startswith(("[", "{")):
+        return v.count("[") + v.count("{") == v.count("]") + v.count("}")
+    return True
+
+
+def yaml_meaning(text):
+    """The lines of a YAML file that can change what it means, or None when the scanner
+    isn't sure. Whole-line comments and blank lines outside block scalars drop out. Every
+    line inside a block scalar (`prompt: |`, `run: >-`) is kept as it is, `#` lines too:
+    there they are content, like a heading in an agent's prompt. A value that might span
+    lines (an open quote or flow collection), a block opener it doesn't recognise (a
+    quoted key, say) and a tab in indentation all make it give up."""
+    out, block = [], None  # block: the indentation of the line that opened a block scalar
+    for line in text.splitlines():
+        lead = line[:len(line) - len(line.lstrip())]
+        if "\t" in lead:
+            return None
+        stripped, indent = line.strip(), len(lead)
+        if block is not None:
+            if not stripped or indent > block:
+                out.append(line)
+                continue
+            block = None
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _ENDS_LIKE_BLOCK.search(stripped):  # a block opener, or something it can't tell from one
+            if not _BLOCK_OPENER.match(stripped):
+                return None
+            block = indent
+        elif not _closed(_value(stripped)):
+            return None
+        out.append(line.rstrip())
+    return out
+
+
+def comment_only(before, after):
+    """True when two versions of a YAML file differ only in whole-line comments or blank
+    lines outside block scalars."""
+    if before == after:
+        return False
+    a, b = yaml_meaning(before), yaml_meaning(after)
+    return a is not None and a == b
 
 
 def _labelled(events, label):
@@ -147,7 +262,10 @@ def dan_approved(repo, labels, events, policy, since):
     (the repo owner) after the PR took its current shape (since, from shaped_since), so
     the approval covers the commit and base he saw. A label added by an agent's GitHub
     App (name[bot]) doesn't count. One added with Dan's own token can't be told apart
-    from his; the agents' rules forbid that and their Bash guard flags it."""
+    from his; the agents' rules forbid that and their Bash guard flags it. The one
+    sanctioned exception: Dan's 👍 on the PR steward's daily digest approves the PRs it
+    lists, and the steward then adds this label with his token, to each PR whose head is
+    still the commit the digest listed."""
     label, owner = policy["dan"]["approved_label"], repo.split("/")[0]
     if label not in labels:
         return False, ""
@@ -195,6 +313,115 @@ def branch_exists(get, repo, branch):
         raise
 
 
+def quote(ref):
+    return urllib.parse.quote(ref, safe="")
+
+
+def file_at(get, repo, path, ref):
+    """(blob sha, text) of a file at a ref; (None, None) when it isn't there. text is None
+    when the contents API won't give it inline (over 1 MB) or it isn't UTF-8."""
+    try:
+        data = get(f"repos/{repo}/contents/{urllib.parse.quote(path)}?ref={quote(ref)}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None, None
+        raise
+    if not isinstance(data, dict) or data.get("type") != "file":
+        raise ValueError(f"{path} at {ref} is not a file")
+    text = None
+    if data.get("encoding") == "base64" and data.get("content") is not None:
+        try:
+            text = base64.b64decode(data["content"]).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            text = None
+    return data["sha"], text
+
+
+def tree_at(get, repo, ref):
+    """{path: blob sha} of every file at a ref. Refuses a tree GitHub cut short."""
+    data = get(f"repos/{repo}/git/trees/{quote(ref)}?recursive=1")
+    if data.get("truncated"):
+        raise ValueError(f"the tree at {ref} is too big for GitHub to list")
+    return {e["path"]: e["sha"] for e in data.get("tree", []) if e.get("type") in ("blob", "commit")}
+
+
+def merge_base(get, repo, base, head):
+    return get(f"repos/{repo}/compare/{quote(base)}...{quote(head)}")["merge_base_commit"]["sha"]
+
+
+def back_merge_check(repo, base, head_sha, files, policy, get):
+    """(source, carried) for a PR into base. A changed file is carried from a ladder branch
+    above base (main, then weekly) when the PR's copy equals that branch's and base hadn't
+    changed the file since the two last shared history: it only brings base what that
+    branch already has. source is the branch that carries every changed file (a pure
+    back-merge), or None; carried maps each carried path to its branch. Read from git
+    trees, not commits: a back-merge branch has a merge commit of its own, a conflict
+    resolution that mixes both sides matches neither branch, and one that took main's copy
+    over base's own newer work would drop that work, so it fails the second test."""
+    paths = {p for f in files for p in (f["path"], f.get("previous")) if p}
+    carried, head, base_tree = {}, None, None
+    for upper in reversed(policy["dan"]["promotion_bases"]):  # main first
+        try:
+            upper_tree = tree_at(get, repo, upper)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:  # this repo has no such branch
+                continue
+            raise
+        if head is None:
+            head, base_tree = tree_at(get, repo, head_sha), tree_at(get, repo, base)
+        shared = tree_at(get, repo, merge_base(get, repo, base, upper))
+        ok = {p for p in paths if head.get(p) == upper_tree.get(p) and base_tree.get(p) == shared.get(p)}
+        if ok == paths:
+            return upper, {p: upper for p in paths}
+        for p in ok:
+            carried.setdefault(p, upper)
+    return None, carried
+
+
+def relief(repo, base, head_sha, files, has_nightly, policy, get, back_merge=True):
+    """(exempt, back_merge, notes) for a PR the stop list would hold, from what GitHub
+    shows now (see the module docstring). Any doubt, a GitHub error included, means no
+    relief: the PR waits for Dan as before, and notes says why."""
+    rules = policy["dan"].get("relief") or {}
+    exempt, back, notes = set(), None, []
+    if len(files) >= MAX_FILES:
+        return exempt, back, notes
+    stop = stop_paths(repo, policy)
+    hits = [f for f in files if matches(f["path"], stop) and f["status"] in ("modified", "added")
+            and not f.get("previous")]
+    try:
+        ref = rules.get("reference") or {}
+        for f in hits:
+            if ref.get("repo") and f["path"] in ref.get("paths", []):
+                mine, _ = file_at(get, repo, f["path"], head_sha)
+                theirs, _ = file_at(get, ref["repo"], f["path"], ref.get("ref", "main"))
+                if mine and mine == theirs:
+                    exempt.add(f["path"])
+                    notes.append(f"{f['path']} is an exact copy of {ref['repo']}'s")
+        suffixes = tuple(rules.get("comment_only") or ())
+        todo = [f for f in hits if suffixes and f["path"] not in exempt and f["status"] == "modified"
+                and f["path"].lower().endswith(suffixes)]
+        if todo:
+            since = merge_base(get, repo, base, head_sha)  # GitHub's diff is against the merge base
+            for f in todo:
+                _, before = file_at(get, repo, f["path"], since)
+                _, after = file_at(get, repo, f["path"], head_sha)
+                if before is not None and after is not None and comment_only(before, after):
+                    exempt.add(f["path"])
+                    notes.append(f"{f['path']}: only comments or blank lines changed")
+        if back_merge and rules.get("back_merge") and has_nightly and base == "nightly":
+            back, carried = back_merge_check(repo, base, head_sha, files, policy, get)
+            if not back:  # a partial back-merge: the stop-list files it only carries from main still pass
+                for f in hits:
+                    if f["path"] in carried and f["path"] not in exempt:
+                        exempt.add(f["path"])
+                        notes.append(f"{f['path']} is {carried[f['path']]}'s copy, which {base} hadn't changed")
+    except Exception as e:  # noqa: BLE001  (relief is optional: any doubt means the PR waits for Dan)
+        return set(), None, [f"could not check for copies, comments or a back-merge "
+                             f"({type(e).__name__}: {one_line(e)}), so no relief"]
+    return exempt, back, notes
+
+
 def author_of(user):
     """A PR author as gh writes it: app/<slug> for an App, else the login."""
     login = (user or {}).get("login") or ""
@@ -210,8 +437,13 @@ def judge_pr(repo, pr, policy, get, has_nightly, commit_seen):
              for f in get(f"repos/{repo}/pulls/{number}/files?per_page=100", paginate=True)]
     events = get(f"repos/{repo}/issues/{number}/events?per_page=100", paginate=True)
     labels = effective_labels([label["name"] for label in pr["labels"]], events, policy)
-    tier, reasons = classify(repo, pr["base"]["ref"], labels, files, has_nightly, policy,
-                             pr["head"]["ref"], author_of(pr.get("user")))
+    args = (repo, pr["base"]["ref"], labels, files, has_nightly, policy, pr["head"]["ref"], author_of(pr.get("user")))
+    tier, reasons = classify(*args)
+    if tier == "dan" and policy["dan"]["label"] not in labels:  # a held PR stays held
+        exempt, back, notes = relief(repo, pr["base"]["ref"], pr["head"]["sha"], files, has_nightly, policy, get)
+        if exempt or back:
+            tier, reasons = classify(*args, exempt=exempt, back_merge=back)
+        reasons = reasons + notes
     if tier != "dan":
         return True, tier, reasons
     if policy["dan"]["label"] not in [label["name"] for label in pr["labels"]] and policy["dan"]["label"] in labels:
