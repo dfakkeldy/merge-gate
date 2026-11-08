@@ -501,7 +501,7 @@ def author_of(user):
 _POWER = (
     # secrets.X, secrets['X'], anything inside ${{ }}, and the key in `secrets: inherit`. Not prose
     # in a comment, which many plain workflows have: "No secrets; nothing is deployed."
-    ("uses a secret", re.compile(r"""\bsecrets\.[a-z_]|\bsecrets\[|\$\{\{[^}]*\bsecrets\b"""
+    ("uses a secret", re.compile(r"""\bsecrets\.[a-z_]|\bsecrets\[|\$\{\{(?s:(?:(?!\}\}).)*?)\bsecrets\b"""
                                  r"""|(?:^|[{,])\s*(?:-\s+)?["']?secrets["']?\s*:""", re.I | re.M)),
     ("asks for write access", re.compile(r"(?<![-.\w])write(?:-all)?\b")),
     ("runs with the base branch's rights", re.compile(r"\b(?:pull_request_target|workflow_run)\b", re.I)),
