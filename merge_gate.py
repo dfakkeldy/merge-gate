@@ -142,26 +142,35 @@ def classify(repo, base, labels, files, has_nightly, policy, head="", author="",
 
 # --- comment-only YAML ------------------------------------------------------------
 
-_INDICATOR = r"[|>](?:[1-9][+-]?|[+-][1-9]?)?\s*(?:#.*)?$"
-# `key: |`, `- >-`, `- key: |2`: a plain key (no quotes, no flow) then a block indicator.
-_BLOCK_OPENER = re.compile(r"^(?:-\s+)*(?:[^\s#'\"{}\[\],&*!|>%@`-][^#'\"{}\[\]]*?:\s+)?" + _INDICATOR)
+_INDICATOR = r"[|>](?:[1-9][+-]?|[+-][1-9]?)?[ ]*(?:#.*)?$"
+_KEY = r"[^ #'\"{}\[\],&*!|>%@`-][^#'\"{}\[\]]*?:[ ]+"
+# `key: |`, `- >-`, `- key: |2`: a dash or a plain key (no quotes, tags, anchors or flow), then
+# a block indicator. An indicator alone on its line isn't one of these, so the scanner gives up.
+_BLOCK_OPENER = re.compile(r"^(?:(?:-[ ]+)+(?:" + _KEY + r")?|(?:-[ ]+)*" + _KEY + ")" + _INDICATOR)
 _ENDS_LIKE_BLOCK = re.compile(_INDICATOR)
-_PLAIN_KEY = re.compile(r"[^\s#'\"{}\[\],&*!|>%@`-][^#'\"{}\[\]]*?:(?:\s+|$)")
+_PLAIN_KEY = re.compile(_KEY[:-len("[ ]+")] + r"(?:[ ]+|$)")
+# Line breaks other than \n and \r\n that str.splitlines() honours but YAML doesn't.
+_ODD_BREAKS = "\x0b\x0c\x1c\x1d\x1e\x85  "
 
 
 def _value(stripped):
-    """A line's value: what follows its list dashes and its plain key, if any."""
+    """A line's value: what follows its list dashes and its plain key; None when a quote or
+    flow character comes before any plain key (a quoted key, say), which it won't read."""
     s = stripped
     while s.startswith("- "):
-        s = s[2:].lstrip()
+        s = s[2:].lstrip(" ")
     m = _PLAIN_KEY.match(s)
-    return s[m.end():] if m else s
+    if m:
+        return s[m.end():]
+    return None if any(c in s for c in "'\"") else s
 
 
 def _closed(value):
-    """False when a quoted or flow value doesn't end on its own line (so later lines,
-    `#` ones included, could be inside it)."""
-    v = value.strip()
+    """False when a value might go on past its line: an open quote or flow collection, or an
+    anchor or tag in front of one (`&a "x`, `!!str 'y`)."""
+    v = value.strip(" ")
+    if v.startswith(("&", "!")):
+        return not any(c in v for c in "'\"[{")
     if v.startswith('"'):
         i = 1
         while i < len(v):
@@ -191,29 +200,40 @@ def yaml_meaning(text):
     """The lines of a YAML file that can change what it means, or None when the scanner
     isn't sure. Whole-line comments and blank lines outside block scalars drop out. Every
     line inside a block scalar (`prompt: |`, `run: >-`) is kept as it is, `#` lines too:
-    there they are content, like a heading in an agent's prompt. A value that might span
-    lines (an open quote or flow collection), a block opener it doesn't recognise (a
-    quoted key, say) and a tab in indentation all make it give up."""
+    there they are content, like a heading in an agent's prompt. It gives up on anything
+    else it can't read with confidence: whitespace other than a plain space anywhere (a
+    no-break space before `#` keeps a plain scalar going), a line break YAML doesn't use, a
+    value that might span lines (an open quote or flow collection, an anchor or tag in
+    front of one, a quoted key), and a block indicator it doesn't recognise."""
+    if any(c in text for c in _ODD_BREAKS):
+        return None
+    pieces = text.split("\n")
+    if pieces and pieces[-1] == "":  # the empty piece after a final newline
+        pieces.pop()
     out, block = [], None  # block: the indentation of the line that opened a block scalar
-    for line in text.splitlines():
-        lead = line[:len(line) - len(line.lstrip())]
-        if "\t" in lead:
+    for raw in pieces:
+        line = raw[:-1] if raw.endswith("\r") else raw
+        if any(c.isspace() and c != " " for c in line):
             return None
-        stripped, indent = line.strip(), len(lead)
+        stripped = line.strip(" ")
+        indent = len(line) - len(line.lstrip(" "))
         if block is not None:
             if not stripped or indent > block:
                 out.append(line)
                 continue
             block = None
+            out.append("\0end of block")  # where a block ends is part of what the file means
         if not stripped or stripped.startswith("#"):
             continue
         if _ENDS_LIKE_BLOCK.search(stripped):  # a block opener, or something it can't tell from one
             if not _BLOCK_OPENER.match(stripped):
                 return None
             block = indent
-        elif not _closed(_value(stripped)):
-            return None
-        out.append(line.rstrip())
+        else:
+            value = _value(stripped)
+            if value is None or not _closed(value):
+                return None
+        out.append(line.rstrip(" "))
     return out
 
 
@@ -317,60 +337,72 @@ def quote(ref):
     return urllib.parse.quote(ref, safe="")
 
 
-def file_at(get, repo, path, ref):
-    """(blob sha, text) of a file at a ref; (None, None) when it isn't there. text is None
-    when the contents API won't give it inline (over 1 MB) or it isn't UTF-8."""
+REGULAR = {"100644", "100755"}  # git modes of plain files; not a symlink (120000) or a submodule (160000)
+
+
+def branch_sha(get, repo, name):
+    """The commit a branch points at, or None when the repo has no such branch. Always the
+    branch: a tag of the same name, which git would pick first, can't stand in for it."""
     try:
-        data = get(f"repos/{repo}/contents/{urllib.parse.quote(path)}?ref={quote(ref)}")
+        return get(f"repos/{repo}/branches/{quote(name)}")["commit"]["sha"]
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return None, None
+            return None
         raise
-    if not isinstance(data, dict) or data.get("type") != "file":
-        raise ValueError(f"{path} at {ref} is not a file")
-    text = None
-    if data.get("encoding") == "base64" and data.get("content") is not None:
+
+
+class Trees:
+    """Files at commits of one repo, read from git trees, so a symlink is a symlink (the
+    contents API would follow it to its target) and a file's mode counts."""
+
+    def __init__(self, get, repo):
+        self.get, self.repo, self.cache = get, repo, {}
+
+    def entries(self, sha):
+        """{path: (mode, blob sha)} of every file at a commit. Refuses a tree GitHub cut short."""
+        if sha not in self.cache:
+            data = self.get(f"repos/{self.repo}/git/trees/{sha}?recursive=1")
+            if data.get("truncated"):
+                raise ValueError(f"the tree at {sha[:10]} is too big for GitHub to list")
+            self.cache[sha] = {e["path"]: (e["mode"], e["sha"]) for e in data.get("tree", [])
+                               if e.get("type") in ("blob", "commit")}
+        return self.cache[sha]
+
+    def text(self, blob):
+        """A blob's text, or None when it isn't UTF-8."""
+        data = self.get(f"repos/{self.repo}/git/blobs/{blob}")
+        if data.get("encoding") != "base64":
+            return None
         try:
-            text = base64.b64decode(data["content"]).decode("utf-8")
+            return base64.b64decode(data["content"]).decode("utf-8")
         except (binascii.Error, UnicodeDecodeError):
-            text = None
-    return data["sha"], text
+            return None
 
 
-def tree_at(get, repo, ref):
-    """{path: blob sha} of every file at a ref. Refuses a tree GitHub cut short."""
-    data = get(f"repos/{repo}/git/trees/{quote(ref)}?recursive=1")
-    if data.get("truncated"):
-        raise ValueError(f"the tree at {ref} is too big for GitHub to list")
-    return {e["path"]: e["sha"] for e in data.get("tree", []) if e.get("type") in ("blob", "commit")}
+def merge_base(get, repo, a, b):
+    """The merge base of two commits (SHAs, never names)."""
+    return get(f"repos/{repo}/compare/{a}...{b}")["merge_base_commit"]["sha"]
 
 
-def merge_base(get, repo, base, head):
-    return get(f"repos/{repo}/compare/{quote(base)}...{quote(head)}")["merge_base_commit"]["sha"]
-
-
-def back_merge_check(repo, base, head_sha, files, policy, get):
-    """(source, carried) for a PR into base. A changed file is carried from a ladder branch
-    above base (main, then weekly) when the PR's copy equals that branch's and base hadn't
-    changed the file since the two last shared history: it only brings base what that
-    branch already has. source is the branch that carries every changed file (a pure
-    back-merge), or None; carried maps each carried path to its branch. Read from git
-    trees, not commits: a back-merge branch has a merge commit of its own, a conflict
-    resolution that mixes both sides matches neither branch, and one that took main's copy
-    over base's own newer work would drop that work, so it fails the second test."""
+def back_merge_check(repo, base_sha, head_sha, files, policy, get, trees):
+    """(source, carried) for a PR into nightly (base_sha, its tip). A changed file is carried
+    from a ladder branch above (main, then weekly) when the PR's copy (content and mode)
+    equals that branch's and nightly hadn't changed it since the two last shared history:
+    it only brings nightly what that branch already has. source is the branch that carries
+    every changed file (a pure back-merge), or None; carried maps each carried path to its
+    branch. Read from git trees, not commits: a back-merge branch has a merge commit of its
+    own, a conflict resolution that mixes both sides matches neither branch, and one that
+    took main's copy over nightly's own newer work would drop that work, so it fails the
+    second test."""
     paths = {p for f in files for p in (f["path"], f.get("previous")) if p}
-    carried, head, base_tree = {}, None, None
+    carried = {}
     for upper in reversed(policy["dan"]["promotion_bases"]):  # main first
-        try:
-            upper_tree = tree_at(get, repo, upper)
-        except urllib.error.HTTPError as e:
-            if e.code == 404:  # this repo has no such branch
-                continue
-            raise
-        if head is None:
-            head, base_tree = tree_at(get, repo, head_sha), tree_at(get, repo, base)
-        shared = tree_at(get, repo, merge_base(get, repo, base, upper))
-        ok = {p for p in paths if head.get(p) == upper_tree.get(p) and base_tree.get(p) == shared.get(p)}
+        upper_sha = branch_sha(get, repo, upper)
+        if upper_sha is None:  # this repo has no such branch
+            continue
+        head, tip, theirs = trees.entries(head_sha), trees.entries(base_sha), trees.entries(upper_sha)
+        shared = trees.entries(merge_base(get, repo, base_sha, upper_sha))
+        ok = {p for p in paths if head.get(p) == theirs.get(p) and tip.get(p) == shared.get(p)}
         if ok == paths:
             return upper, {p: upper for p in paths}
         for p in ok:
@@ -390,27 +422,36 @@ def relief(repo, base, head_sha, files, has_nightly, policy, get, back_merge=Tru
     hits = [f for f in files if matches(f["path"], stop) and f["status"] in ("modified", "added")
             and not f.get("previous")]
     try:
+        trees = Trees(get, repo)
+        head = lambda: trees.entries(head_sha)  # noqa: E731  (fetched only when a rule needs it)
         ref = rules.get("reference") or {}
-        for f in hits:
-            if ref.get("repo") and f["path"] in ref.get("paths", []):
-                mine, _ = file_at(get, repo, f["path"], head_sha)
-                theirs, _ = file_at(get, ref["repo"], f["path"], ref.get("ref", "main"))
-                if mine and mine == theirs:
+        refs = [f for f in hits if ref.get("repo") and f["path"] in ref.get("paths", [])]
+        if refs:
+            ref_sha = branch_sha(get, ref["repo"], ref.get("ref", "main"))
+            theirs = Trees(get, ref["repo"]).entries(ref_sha) if ref_sha else {}
+            for f in refs:
+                mine = head().get(f["path"])
+                if mine and mine[0] in REGULAR and mine == theirs.get(f["path"]):
                     exempt.add(f["path"])
                     notes.append(f"{f['path']} is an exact copy of {ref['repo']}'s")
         suffixes = tuple(rules.get("comment_only") or ())
         todo = [f for f in hits if suffixes and f["path"] not in exempt and f["status"] == "modified"
                 and f["path"].lower().endswith(suffixes)]
-        if todo:
-            since = merge_base(get, repo, base, head_sha)  # GitHub's diff is against the merge base
+        base_sha = branch_sha(get, repo, base) if (todo or (back_merge and rules.get("back_merge"))) else None
+        if todo and base_sha:
+            since = merge_base(get, repo, base_sha, head_sha)  # GitHub's diff is against the merge base
+            then, tip = trees.entries(since), trees.entries(base_sha)
             for f in todo:
-                _, before = file_at(get, repo, f["path"], since)
-                _, after = file_at(get, repo, f["path"], head_sha)
+                old, new, now = then.get(f["path"]), head().get(f["path"]), tip.get(f["path"])
+                # both plain files of one mode, and the base hasn't moved that file since the merge base
+                if not (old and new and old[0] == new[0] and old[0] in REGULAR and now == old):
+                    continue
+                before, after = trees.text(old[1]), trees.text(new[1])
                 if before is not None and after is not None and comment_only(before, after):
                     exempt.add(f["path"])
                     notes.append(f"{f['path']}: only comments or blank lines changed")
-        if back_merge and rules.get("back_merge") and has_nightly and base == "nightly":
-            back, carried = back_merge_check(repo, base, head_sha, files, policy, get)
+        if back_merge and rules.get("back_merge") and has_nightly and base == "nightly" and base_sha:
+            back, carried = back_merge_check(repo, base_sha, head_sha, files, policy, get, trees)
             if not back:  # a partial back-merge: the stop-list files it only carries from main still pass
                 for f in hits:
                     if f["path"] in carried and f["path"] not in exempt:

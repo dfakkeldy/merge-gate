@@ -38,9 +38,16 @@ kinds through; remove a key to switch its rule off. `needs-dan` still holds all 
 | `comment_only` | a `.yml`/`.yaml` file where only whole-line comments or blank lines changed, outside block scalars | a `#` line inside a block scalar (`prompt: \|`, `run: \|`), which is content; a trailing comment on a value line; anything the scanner can't read with confidence (a multi-line quoted or flow value, a quoted key opening a block, a tag before a block indicator, a tab in indentation) |
 | `back_merge` | in a PR into `nightly`, a stop-list file that is exactly `main`'s (or `weekly`'s) copy, where `nightly` hadn't changed it since the two last shared history. If every changed file passes, the whole PR is low tier | a file that mixes both sides after a conflict, or that would replace `nightly`'s own newer work with `main`'s copy |
 
-What these rules can't see: `comment_only` reads YAML with a small scanner, not a
-parser, so it refuses anything unusual rather than guess; `back_merge` trusts that
-`main` itself is gated; an error while checking means no relief, never a pass.
+What these rules can't see. `comment_only` reads YAML with a small scanner, not a
+parser, so it refuses anything unusual rather than guess: any whitespace but a plain
+space, a value that might span lines, a block indicator it doesn't know. A test checks
+it against PyYAML on every comment edit it accepts; on 53 real workflow files it
+accepted 34,273 edits and PyYAML agreed with every one. Files are read from git trees,
+so a symlink or a mode change never passes, and branches are read as branches, so a tag
+of the same name can't stand in. `reference` and `back_merge` trust the branch they
+compare with (`main` here, `main` in the app repo): where that branch doesn't bind
+admins, Dan's token, which agents share, can push to it directly. Any error while
+checking means no relief, never a pass.
 
 ## How it stays safe
 
